@@ -1,6 +1,8 @@
 import os
+import sys
 import time
 from io import BytesIO
+from typing import Dict, Any, List
 
 import requests
 from dotenv import load_dotenv
@@ -13,12 +15,16 @@ AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
 AZURE_API_VERSION = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION", "2024-11-30")
 
 
+def _log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 def _is_size_error(message: str) -> bool:
     text = (message or "").lower()
     return "invalidcontentlength" in text or "too large" in text
 
 
-def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout") -> dict:
+def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout") -> Dict[str, Any]:
     if not AZURE_ENDPOINT:
         raise Exception("Falta AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT en .env")
 
@@ -64,11 +70,11 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         return data
 
 
-def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> list[bytes]:
+def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> List[bytes]:
     reader = PdfReader(BytesIO(file_bytes))
     total_pages = len(reader.pages)
 
-    chunks: list[bytes] = []
+    chunks = []
 
     for start in range(0, total_pages, pages_per_chunk):
         end = min(start + pages_per_chunk, total_pages)
@@ -84,7 +90,7 @@ def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> list[bytes]:
     return chunks
 
 
-def merge_azure_results(results: list[dict]) -> dict:
+def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     merged_content_parts = []
     merged_pages = []
     merged_tables = []
@@ -151,30 +157,30 @@ def analyze_pdf_with_auto_split(
     file_bytes: bytes,
     model: str = "prebuilt-layout",
     pages_per_chunk: int = 5,
-) -> dict:
+) -> Dict[str, Any]:
     try:
-        print("Intentando analizar PDF completo...")
+        _log("Intentando analizar PDF completo...")
         return _analyze_single_pdf_bytes(file_bytes, model=model)
     except Exception as e:
         if not _is_size_error(str(e)):
             raise
-        print("Azure rechazó el PDF completo por tamaño. Se intentará dividir.")
+        _log("Azure rechazó el PDF completo por tamaño. Se intentará dividir.")
 
     current_chunk_size = pages_per_chunk
 
     while current_chunk_size >= 1:
-        print(f"Intentando dividir PDF en bloques de {current_chunk_size} página(s)...")
+        _log(f"Intentando dividir PDF en bloques de {current_chunk_size} página(s)...")
         chunks = split_pdf_bytes(file_bytes, pages_per_chunk=current_chunk_size)
         partial_results = []
         failed_due_to_size = False
 
         for index, chunk_bytes in enumerate(chunks, start=1):
             try:
-                print(f"Procesando chunk {index}/{len(chunks)} con {current_chunk_size} página(s)...")
+                _log(f"Procesando chunk {index}/{len(chunks)} con {current_chunk_size} página(s)...")
                 partial_results.append(_analyze_single_pdf_bytes(chunk_bytes, model=model))
             except Exception as e:
                 if _is_size_error(str(e)) and current_chunk_size > 1:
-                    print(f"Chunk {index} todavía muy grande. Se reducirá el tamaño del bloque.")
+                    _log(f"Chunk {index} todavía muy grande. Se reducirá el tamaño del bloque.")
                     failed_due_to_size = True
                     break
                 raise

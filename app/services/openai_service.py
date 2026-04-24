@@ -2,6 +2,7 @@ import json
 import os
 import re
 from pathlib import Path
+from typing import Optional, Any, Dict, List
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -37,12 +38,12 @@ def _extract_json_candidate(text: str) -> str:
     return text[start:end + 1]
 
 
-def _parse_json_strict(text: str) -> dict:
+def _parse_json_strict(text: str) -> Dict[str, Any]:
     candidate = _extract_json_candidate(text)
     return json.loads(candidate)
 
 
-def _repair_json_with_openai(bad_text: str) -> dict:
+def _repair_json_with_openai(bad_text: str) -> Dict[str, Any]:
     prompt = f"""
 Convierte el siguiente contenido en JSON válido.
 
@@ -67,14 +68,14 @@ Contenido:
     return json.loads(repaired_candidate)
 
 
-def _safe_json_from_model_output(output_text: str) -> dict:
+def _safe_json_from_model_output(output_text: str) -> Dict[str, Any]:
     try:
         return _parse_json_strict(output_text)
     except Exception:
         return _repair_json_with_openai(output_text)
 
 
-def structure_licitacion_text(raw_text: str) -> dict:
+def structure_licitacion_text(raw_text: str) -> Dict[str, Any]:
     if not OPENAI_API_KEY:
         raise Exception("Falta OPENAI_API_KEY en .env")
 
@@ -146,14 +147,14 @@ def _normalize_number(value):
 def _normalize_text(value):
     if value is None:
         return None
-    return re.sub(r'\s+', ' ', str(value)).strip()
+    return re.sub(r"\s+", " ", str(value)).strip()
 
 
 def _normalize_yes_no(value):
     if value is None:
         return None
 
-    txt = _normalize_text(value).lower()
+    txt = (_normalize_text(value) or "").lower()
     if txt in ["si", "sí", "s1", "sl"]:
         return "Si"
     if txt in ["no"]:
@@ -161,13 +162,13 @@ def _normalize_yes_no(value):
     return value
 
 
-def _build_table_matrix(table: dict):
+def _build_table_matrix(table: Dict[str, Any]) -> List[List[str]]:
     row_count = table.get("rowCount", 0)
     col_count = table.get("columnCount", 0)
 
     matrix = [["" for _ in range(col_count)] for _ in range(row_count)]
 
-    for cell in table.get("cells", []):
+    for cell in table.get("cells", []) or []:
         r = cell.get("rowIndex", 0)
         c = cell.get("columnIndex", 0)
         content = _normalize_text(cell.get("content", "")) or ""
@@ -178,7 +179,7 @@ def _build_table_matrix(table: dict):
     return matrix
 
 
-def _is_candidate_items_table(matrix: list[list[str]]) -> bool:
+def _is_candidate_items_table(matrix: List[List[str]]) -> bool:
     flat = " ".join(" ".join(row) for row in matrix).lower()
 
     keywords = ["subpartida", "concepto", "unidad", "cantidad", "muestra"]
@@ -187,7 +188,7 @@ def _is_candidate_items_table(matrix: list[list[str]]) -> bool:
     return score >= 3
 
 
-def _extract_row_from_table(row: list[str]) -> dict | None:
+def _extract_row_from_table(row: List[str]) -> Optional[Dict[str, Any]]:
     values = [_normalize_text(x) or "" for x in row]
     non_empty = [v for v in values if v]
 
@@ -195,7 +196,7 @@ def _extract_row_from_table(row: list[str]) -> dict | None:
         return None
 
     first = non_empty[0]
-    if not re.match(r'^\d{1,4}$', first):
+    if not re.match(r"^\d{1,4}$", first):
         return None
 
     subpartida = _normalize_number(first)
@@ -205,9 +206,6 @@ def _extract_row_from_table(row: list[str]) -> dict | None:
     cantidad_maxima = None
     muestra = None
 
-    # Normalmente viene algo como:
-    # [subpartida, concepto, unidad, min, max, muestra]
-    # o a veces con columnas extra
     if len(non_empty) >= 6:
         unidad = non_empty[-4]
         cantidad_minima = _normalize_number(non_empty[-3])
@@ -236,7 +234,7 @@ def _extract_row_from_table(row: list[str]) -> dict | None:
     }
 
 
-def extract_items_from_azure_tables(raw_analyze_result: dict) -> dict:
+def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[str, Any]:
     tables = raw_analyze_result.get("tables", []) or []
 
     all_items = []
@@ -252,7 +250,6 @@ def extract_items_from_azure_tables(raw_analyze_result: dict) -> dict:
             if parsed:
                 all_items.append(parsed)
 
-    # quitar duplicados y ordenar
     unique = []
     seen = set()
 
