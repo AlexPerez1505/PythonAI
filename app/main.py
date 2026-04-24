@@ -11,7 +11,7 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 from app.services.azure_service import analyze_pdf_with_auto_split
-from app.services.openai_service import structure_licitacion_text, extract_items_from_azure_tables
+from app.services.openai_service import extract_items_from_azure_tables
 
 app = FastAPI(title="Python AI Service")
 
@@ -78,15 +78,16 @@ def process_document_job(job_id: str, file_path: str, pages_per_chunk: int) -> N
         analyze_result = result.get("analyzeResult", {})
         full_content = analyze_result.get("content", "") or ""
 
+        items = extract_items_from_azure_tables(analyze_result)
+
         job["status"] = "completed"
         job["result"] = {
             "ok": True,
             "status": result.get("status"),
             "content_preview": full_content[:2000],
-            "full_text": full_content,
             "pages_count": len(analyze_result.get("pages", [])),
             "tables_count": len(analyze_result.get("tables", [])),
-            "raw_analyze_result": analyze_result,
+            "items_json": items,
         }
         save_job(job_id, job)
 
@@ -114,24 +115,12 @@ def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, file
     analyze_result = result.get("analyzeResult", {})
     full_content = analyze_result.get("content", "") or ""
 
-    structured = None
-    items = None
-
-    try:
-        if full_content:
-            structured = structure_licitacion_text(full_content)
-    except Exception as e:
-        structured = {
-            "ok": False,
-            "error": f"Error estructurando con OpenAI: {str(e)}",
-        }
-
     try:
         items = extract_items_from_azure_tables(analyze_result)
     except Exception as e:
         items = {
             "ok": False,
-            "error": f"Error extrayendo partidas desde tablas: {str(e)}",
+            "error": f"Error extrayendo partidas/productos desde el documento: {str(e)}",
             "items_count": 0,
             "items": [],
         }
@@ -145,11 +134,13 @@ def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, file
             "ok": True,
             "status": result.get("status"),
             "content_preview": full_content[:2000],
-            "full_text": full_content,
             "pages_count": len(analyze_result.get("pages", [])),
             "tables_count": len(analyze_result.get("tables", [])),
         },
-        "structured_json": structured,
+        "structured_json": {
+            "ok": True,
+            "message": "Omitido. Solo se extraen productos/servicios solicitados para cotización.",
+        },
         "items_json": items,
     }
 
@@ -259,56 +250,6 @@ def get_job_result(job_id: str):
     }
 
 
-@app.get("/documents/jobs/{job_id}/structured")
-def get_structured_result(job_id: str):
-    try:
-        job = load_job(job_id)
-    except Exception as e:
-        return JSONResponse(
-            status_code=503,
-            content={"ok": False, "message": f"Job temporalmente no disponible: {str(e)}"},
-        )
-
-    if not job:
-        return JSONResponse(
-            status_code=404,
-            content={"ok": False, "message": "Job no encontrado"},
-        )
-
-    if job.get("status") != "completed":
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": job.get("status"),
-            "error": job.get("error"),
-        }
-
-    result = job.get("result") or {}
-    full_text = result.get("full_text", "")
-
-    if not full_text:
-        return JSONResponse(
-            status_code=400,
-            content={"ok": False, "message": "El job no tiene texto OCR disponible."},
-        )
-
-    try:
-        structured = structure_licitacion_text(full_text)
-
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": "completed",
-            "structured": structured,
-        }
-
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"ok": False, "message": f"Error estructurando con OpenAI: {str(e)}"},
-        )
-
-
 @app.get("/documents/jobs/{job_id}/items")
 def get_items_result(job_id: str):
     try:
@@ -334,29 +275,16 @@ def get_items_result(job_id: str):
         }
 
     result = job.get("result") or {}
-    raw_analyze_result = result.get("raw_analyze_result")
 
-    if not raw_analyze_result:
-        return JSONResponse(
-            status_code=400,
-            content={"ok": False, "message": "El job no tiene raw_analyze_result disponible."},
-        )
-
-    try:
-        items = extract_items_from_azure_tables(raw_analyze_result)
-
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": "completed",
-            "items_result": items,
-        }
-
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"ok": False, "message": f"Error extrayendo partidas desde tablas: {str(e)}"},
-        )
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": "completed",
+        "items_result": result.get("items_json") or {
+            "items_count": 0,
+            "items": [],
+        },
+    }
 
 
 if __name__ == "__main__":
