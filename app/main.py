@@ -85,10 +85,12 @@ def process_document_job(job_id: str, file_path: str, pages_per_chunk: int) -> N
             "ok": True,
             "status": result.get("status"),
             "content_preview": full_content[:2000],
+            "full_text": full_content,
             "pages_count": len(analyze_result.get("pages", [])),
             "tables_count": len(analyze_result.get("tables", [])),
             "items_json": items,
         }
+
         save_job(job_id, job)
 
     except Exception as e:
@@ -134,6 +136,7 @@ def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, file
             "ok": True,
             "status": result.get("status"),
             "content_preview": full_content[:2000],
+            "full_text": full_content,
             "pages_count": len(analyze_result.get("pages", [])),
             "tables_count": len(analyze_result.get("tables", [])),
         },

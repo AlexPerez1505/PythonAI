@@ -297,12 +297,7 @@ def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[D
             return None
         return _normalize_text(row[idx])
 
-    numero = (
-        get_col("numero")
-        or get_col("partida")
-        or get_col("subpartida")
-    )
-
+    numero = get_col("numero")
     numero_normalizado = _normalize_number(numero)
 
     descripcion = get_col("descripcion")
@@ -444,9 +439,6 @@ def _extract_items_from_matrix(matrix: List[List[str]]) -> List[Dict[str, Any]]:
             if parsed:
                 items.append(parsed)
 
-    if items:
-        return items
-
     for row in matrix:
         if _looks_like_header(row):
             continue
@@ -478,13 +470,16 @@ def _extract_items_from_text(raw_text: str) -> List[Dict[str, Any]]:
 
         if re.match(r"^\d{1,5}$", line):
             numero = _normalize_number(line)
-            chunk = lines[i:i + 8]
+            chunk = lines[i:i + 16]
 
             nums = []
             unidad = None
             desc_parts = []
 
             for part in chunk[1:]:
+                if re.match(r"^\d{1,5}$", part) and len(desc_parts) > 0:
+                    break
+
                 if _normalize_number(part) is not None and re.match(r"^[\d,\.\sOo]+$", part):
                     nums.append(_normalize_number(part))
                     continue
@@ -512,8 +507,6 @@ def _extract_items_from_text(raw_text: str) -> List[Dict[str, Any]]:
                     "presentar_muestra": None,
                 }
                 items.append(item)
-                i += max(4, len(chunk))
-                continue
 
         i += 1
 
@@ -521,23 +514,22 @@ def _extract_items_from_text(raw_text: str) -> List[Dict[str, Any]]:
 
 
 def _dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    unique = []
-    seen = set()
+    merged: Dict[str, Dict[str, Any]] = {}
 
     for item in items:
         numero = str(item.get("numero") or item.get("partida") or item.get("subpartida") or "").strip()
-        desc = str(item.get("descripcion") or item.get("nombre") or "").strip().lower()
+        desc = str(item.get("descripcion") or item.get("nombre") or "").strip()
 
         if not numero or not desc:
             continue
 
-        key = (numero, desc[:120])
-
-        if key in seen:
+        if numero not in merged:
+            merged[numero] = item
             continue
 
-        seen.add(key)
-        unique.append(item)
+        old_desc = str(merged[numero].get("descripcion") or merged[numero].get("nombre") or "")
+        if len(desc) > len(old_desc):
+            merged[numero] = item
 
     def sort_key(x):
         value = x.get("numero") or x.get("partida") or x.get("subpartida") or 999999
@@ -546,7 +538,7 @@ def _dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         except Exception:
             return 999999
 
-    return sorted(unique, key=sort_key)
+    return sorted(merged.values(), key=sort_key)
 
 
 def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -557,9 +549,8 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
         matrix = _build_table_matrix(table)
         all_items.extend(_extract_items_from_matrix(matrix))
 
-    if not all_items:
-        raw_text = raw_analyze_result.get("content", "") or ""
-        all_items.extend(_extract_items_from_text(raw_text))
+    raw_text = raw_analyze_result.get("content", "") or ""
+    all_items.extend(_extract_items_from_text(raw_text))
 
     unique = _dedupe_items(all_items)
 
