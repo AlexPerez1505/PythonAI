@@ -1,8 +1,11 @@
+import argparse
 import json
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
@@ -25,7 +28,7 @@ def job_file(job_id: str) -> Path:
     return JOBS_DIR / f"{job_id}.json"
 
 
-def save_job(job_id: str, payload: dict) -> None:
+def save_job(job_id: str, payload: Dict[str, Any]) -> None:
     final_path = job_file(job_id)
     temp_path = JOBS_DIR / f"{job_id}.tmp"
 
@@ -36,7 +39,7 @@ def save_job(job_id: str, payload: dict) -> None:
     temp_path.replace(final_path)
 
 
-def load_job(job_id: str, retries: int = 5, delay: float = 0.15) -> dict | None:
+def load_job(job_id: str, retries: int = 5, delay: float = 0.15) -> Optional[Dict[str, Any]]:
     path = job_file(job_id)
 
     if not path.exists():
@@ -83,7 +86,7 @@ def process_document_job(job_id: str, file_path: str, pages_per_chunk: int) -> N
             "full_text": full_content,
             "pages_count": len(analyze_result.get("pages", [])),
             "tables_count": len(analyze_result.get("tables", [])),
-            "raw_analyze_result": analyze_result,  # IMPORTANTE
+            "raw_analyze_result": analyze_result,
         }
         save_job(job_id, job)
 
@@ -96,6 +99,59 @@ def process_document_job(job_id: str, file_path: str, pages_per_chunk: int) -> N
         job["status"] = "failed"
         job["error"] = str(e)
         save_job(job_id, job)
+
+
+def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, filename: str) -> Dict[str, Any]:
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
+    result = analyze_pdf_with_auto_split(
+        file_bytes=file_bytes,
+        model="prebuilt-layout",
+        pages_per_chunk=pages_per_chunk,
+    )
+
+    analyze_result = result.get("analyzeResult", {})
+    full_content = analyze_result.get("content", "") or ""
+
+    structured = None
+    items = None
+
+    try:
+        if full_content:
+            structured = structure_licitacion_text(full_content)
+    except Exception as e:
+        structured = {
+            "ok": False,
+            "error": f"Error estructurando con OpenAI: {str(e)}",
+        }
+
+    try:
+        items = extract_items_from_azure_tables(analyze_result)
+    except Exception as e:
+        items = {
+            "ok": False,
+            "error": f"Error extrayendo partidas desde tablas: {str(e)}",
+            "items_count": 0,
+            "items": [],
+        }
+
+    return {
+        "ok": True,
+        "status": "completed",
+        "run_id": run_id,
+        "filename": filename,
+        "result_json": {
+            "ok": True,
+            "status": result.get("status"),
+            "content_preview": full_content[:2000],
+            "full_text": full_content,
+            "pages_count": len(analyze_result.get("pages", [])),
+            "tables_count": len(analyze_result.get("tables", [])),
+        },
+        "structured_json": structured,
+        "items_json": items,
+    }
 
 
 @app.get("/")
@@ -301,3 +357,28 @@ def get_items_result(job_id: str):
             status_code=500,
             content={"ok": False, "message": f"Error extrayendo partidas desde tablas: {str(e)}"},
         )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Python AI CLI runner")
+    parser.add_argument("--file", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--pages-per-chunk", type=int, default=5)
+    parser.add_argument("--filename", default="document.pdf")
+
+    args = parser.parse_args()
+
+    try:
+        output = analyze_document_cli(
+            file_path=args.file,
+            run_id=args.run_id,
+            pages_per_chunk=args.pages_per_chunk,
+            filename=args.filename,
+        )
+
+        print(json.dumps(output, ensure_ascii=False))
+        sys.exit(0)
+
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
