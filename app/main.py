@@ -1,10 +1,27 @@
+import os
+import sys
+from pathlib import Path
+
+# ============================================================
+# FIX IMPORTS EN HOSTING / CPANEL
+# Permite ejecutar este archivo de estas formas:
+# python3 app/main.py ...
+# python3 /ruta/completa/python-ai/app/main.py ...
+# uvicorn app.main:app ...
+# ============================================================
+
+CURRENT_FILE = Path(__file__).resolve()
+APP_DIR = CURRENT_FILE.parent
+BASE_DIR = APP_DIR.parent
+
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 import argparse
 import json
-import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, UploadFile, File, Form
@@ -15,7 +32,6 @@ from app.services.openai_service import extract_items_from_azure_tables
 
 app = FastAPI(title="Python AI Service")
 
-BASE_DIR = Path(__file__).resolve().parents[1]
 STORAGE_DIR = BASE_DIR / "storage"
 JOBS_DIR = STORAGE_DIR / "jobs"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
