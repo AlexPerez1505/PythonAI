@@ -702,14 +702,14 @@ def looks_like_real_product_description(text: str) -> bool:
         return True
 
     return False
-
-
 def clean_product_description(text: str) -> str:
     clean = normalize_spaces(text)
 
     clean = re.sub(r"^\s*[0-9]+\s*\|\s*", "", clean)
     clean = re.sub(r"^\s*[0-9]+\s+", "", clean)
 
+    # Si Azure pegó códigos antes de la unidad real del producto,
+    # recorta desde la primera unidad válida.
     unit_start = re.search(
         r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b\s*,?",
         clean,
