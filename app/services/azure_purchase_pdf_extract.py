@@ -258,25 +258,90 @@ def money_to_float(value: Optional[str]) -> Optional[float]:
         return None
 
 
+def looks_like_money_cell(value: str) -> bool:
+    text = normalize_spaces(value)
+
+    if not text:
+        return False
+
+    if re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", text):
+        return False
+
+    if "/" in text or '"' in text or "°" in text:
+        return False
+
+    if "$" in text:
+        return True
+
+    # 123.45, 1,234.56
+    if re.fullmatch(r"[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})", text):
+        return True
+
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]{2,4})", text):
+        return True
+
+    return False
+
+
+def extract_money_from_cell(value: str) -> Optional[float]:
+    if not looks_like_money_cell(value):
+        return None
+
+    return money_to_float(value)
+
+
 def find_money_values(text: str) -> List[float]:
     if not text:
         return []
 
-    matches = re.findall(
-        r"\$?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|[0-9]+(?:\.[0-9]{2,4})|[0-9]+,[0-9]{2,4})",
-        text,
-        flags=re.I,
-    )
-
     values = []
 
-    for match in matches:
-        value = money_to_float(match)
+    parts = re.split(r"\s*\|\s*|\t+", text)
 
-        if value is not None:
-            values.append(value)
+    for part in parts:
+        amount = extract_money_from_cell(part)
+
+        if amount is not None:
+            values.append(amount)
+
+    # Fallback solo para valores con símbolo $, no para medidas.
+    if not values:
+        matches = re.findall(
+            r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|[0-9]+(?:\.[0-9]{2,4}))",
+            text,
+            flags=re.I,
+        )
+
+        for match in matches:
+            value = money_to_float(match)
+
+            if value is not None:
+                values.append(value)
 
     return values
+
+
+def parse_number(value: str) -> Optional[float]:
+    text = normalize_spaces(value)
+
+    if not text:
+        return None
+
+    if re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", text):
+        return None
+
+    if "/" in text or '"' in text or "°" in text:
+        return None
+
+    text = text.replace(",", "")
+
+    if not re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", text):
+        return None
+
+    try:
+        return float(text)
+    except Exception:
+        return None
 
 
 def find_qty_values(text: str) -> Optional[float]:
@@ -305,13 +370,112 @@ def find_qty_values(text: str) -> Optional[float]:
         try:
             qty = float(value)
 
-            if 0 < qty <= 99999:
+            if 0 < qty <= 999999:
                 return qty
 
         except Exception:
             return None
 
     return None
+
+
+def looks_like_unit(value: str) -> bool:
+    text = normalize_spaces(value).upper().replace(".", "")
+
+    units = {
+        "PIEZA", "PZA", "PZ", "CAJA", "CAJAS", "PAQUETE", "PAQUETES",
+        "PQT", "KG", "KILO", "KILOS", "GRAMO", "GRAMOS", "GR",
+        "LITRO", "LITROS", "LT", "SERVICIO", "SERVICIOS", "M",
+        "METRO", "METROS", "ROLLO", "ROLLOS", "BOLSA", "BOLSAS",
+        "CUBETA", "CUBETAS", "JUEGO", "JUEGOS", "LOTE", "LOTES",
+        "UNIDAD", "UNIDADES", "PAR", "PARES"
+    }
+
+    return text in units
+
+
+def normalize_unit(value: str) -> str:
+    text = normalize_spaces(value).upper().replace(".", "")
+
+    aliases = {
+        "PZA": "PIEZA",
+        "PZ": "PIEZA",
+        "UNIDAD": "PIEZA",
+        "UNIDADES": "PIEZA",
+        "CAJAS": "CAJA",
+        "PAQUETES": "PAQUETE",
+        "PQT": "PAQUETE",
+        "KILO": "KG",
+        "KILOS": "KG",
+        "GRAMOS": "GR",
+        "LITROS": "LT",
+        "SERVICIOS": "SERVICIO",
+        "METRO": "M",
+        "METROS": "M",
+        "ROLLOS": "ROLLO",
+        "BOLSAS": "BOLSA",
+        "CUBETAS": "CUBETA",
+        "JUEGOS": "JUEGO",
+        "LOTES": "LOTE",
+        "PARES": "PAR",
+    }
+
+    return aliases.get(text, text)
+
+
+def looks_like_description(value: str) -> bool:
+    text = normalize_spaces(value)
+
+    if len(text) < 10:
+        return False
+
+    if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", text):
+        return False
+
+    if looks_like_unit(text):
+        return False
+
+    bad = text.lower()
+
+    if any(word in bad for word in [
+        "subtotal",
+        "total",
+        "iva",
+        "impuesto",
+        "sello",
+        "uuid",
+        "certificado",
+        "forma de pago",
+        "método de pago",
+        "metodo de pago",
+        "emisor",
+        "receptor",
+        "rfc",
+        "régimen fiscal",
+        "regimen fiscal",
+        "lugar de expedición",
+        "lugar de expedicion",
+    ]):
+        return False
+
+    return True
+
+
+def choose_description_from_values(values: List[str]) -> str:
+    descriptions = [v for v in values if looks_like_description(v)]
+
+    if not descriptions:
+        return ""
+
+    return max(descriptions, key=len)[:255]
+
+
+def choose_unit_from_values(values: List[str]) -> str:
+    for value in values:
+        if looks_like_unit(value):
+            return normalize_unit(value)
+
+    return ""
 
 
 def detect_document_header(content: str, category: str) -> Dict[str, Any]:
@@ -412,7 +576,7 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
     supplier_name = None
     lines = [normalize_spaces(line) for line in content.splitlines() if normalize_spaces(line)]
 
-    for line in lines[:40]:
+    for line in lines[:60]:
         low = line.lower()
 
         if any(skip in low for skip in [
@@ -427,6 +591,8 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
             "certificado",
             "sello",
             "cadena original",
+            "gobierno de méxico",
+            "gobierno de mexico",
         ]):
             continue
 
@@ -471,13 +637,13 @@ def table_to_matrix(table: Dict[str, Any]) -> List[List[str]]:
     return matrix
 
 
-def looks_like_item_row(line: str) -> bool:
+def row_is_noise(line: str) -> bool:
     low = line.lower()
 
     if not line or len(line) < 4:
-        return False
+        return True
 
-    if any(word in low for word in [
+    return any(word in low for word in [
         "subtotal",
         "total",
         "iva",
@@ -495,22 +661,13 @@ def looks_like_item_row(line: str) -> bool:
         "regimen fiscal",
         "régimen fiscal",
         "lugar de expedición",
-    ]):
-        return False
-
-    values = find_money_values(line)
-
-    if len(values) < 1:
-        return False
-
-    has_letters = bool(re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", line))
-
-    return has_letters
+        "lugar de expedicion",
+    ])
 
 
 def clean_item_name_from_line(line: str) -> str:
     item_name = re.sub(
-        r"\$?\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|\$?\s*[0-9]+(?:\.[0-9]{2,4})|\$?\s*[0-9]+,[0-9]{2,4}",
+        r"\$\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|\$\s*[0-9]+(?:\.[0-9]{2,4})",
         " ",
         line,
     )
@@ -528,6 +685,73 @@ def clean_item_name_from_line(line: str) -> str:
     return item_name[:255]
 
 
+def infer_qty_from_values(values: List[str], description: str, unit: str) -> float:
+    numeric_cells = []
+
+    for value in values:
+        text = normalize_spaces(value)
+
+        if text == description:
+            continue
+
+        if unit and normalize_unit(text) == unit:
+            continue
+
+        n = parse_number(text)
+
+        if n is None:
+            continue
+
+        # Evita agarrar decimales/medidas como cantidad.
+        if n <= 0:
+            continue
+
+        numeric_cells.append(n)
+
+    if not numeric_cells:
+        return 1.0
+
+    # En muchos formatos:
+    # partida | cantidad | clave | unidad | descripción
+    # Si hay varios enteros, el segundo suele ser cantidad.
+    if len(numeric_cells) >= 2:
+        qty = numeric_cells[1]
+    else:
+        qty = numeric_cells[0]
+
+    if qty <= 0:
+        return 1.0
+
+    return round(qty, 3)
+
+
+def infer_amounts_from_values(values: List[str], qty: float) -> Dict[str, Optional[float]]:
+    amount_cells = []
+
+    for value in values:
+        amount = extract_money_from_cell(value)
+
+        if amount is not None and amount > 0:
+            amount_cells.append(amount)
+
+    unit_price = None
+    line_total = None
+
+    if len(amount_cells) >= 2:
+        unit_price = amount_cells[-2]
+        line_total = amount_cells[-1]
+    elif len(amount_cells) == 1:
+        line_total = amount_cells[0]
+
+        if qty > 0:
+            unit_price = round(line_total / qty, 4)
+
+    return {
+        "unit_price": unit_price,
+        "line_total": line_total,
+    }
+
+
 def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     items = []
 
@@ -542,56 +766,33 @@ def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, An
 
             line = " | ".join(values)
 
-            if not looks_like_item_row(line):
+            if row_is_noise(line):
                 continue
 
-            money_values = find_money_values(line)
-
-            if not money_values:
-                continue
-
-            qty = find_qty_values(line) or 1.0
-            line_total = money_values[-1]
-            unit_price = None
-
-            if len(money_values) >= 2:
-                unit_price = money_values[-2]
-            elif qty > 0 and line_total > 0:
-                unit_price = round(line_total / qty, 4)
-
-            name_parts = []
-
-            for value in values:
-                if not find_money_values(value):
-                    if not re.fullmatch(r"[0-9.,]+", value):
-                        name_parts.append(value)
-
-            item_name = normalize_spaces(" ".join(name_parts))
+            item_name = choose_description_from_values(values)
 
             if not item_name:
-                item_name = clean_item_name_from_line(line)
-
-            low_name = item_name.lower()
-
-            if low_name in [
-                "cantidad descripcion precio importe",
-                "cantidad descripción precio importe",
-                "descripcion precio importe",
-                "descripción precio importe",
-                "concepto precio importe",
-            ]:
                 continue
+
+            unit = choose_unit_from_values(values)
+            qty = infer_qty_from_values(values, item_name, unit)
+
+            amounts = infer_amounts_from_values(values, qty)
+
+            unit_price = amounts["unit_price"]
+            line_total = amounts["line_total"]
 
             items.append({
                 "item_raw": line,
                 "item_name": item_name[:255],
                 "qty": qty,
-                "unit": "",
+                "unit": unit,
                 "unit_price": unit_price,
                 "line_total": line_total,
                 "ai_meta": {
                     "prodserv": None,
                     "source": "azure_document_intelligence_table",
+                    "has_amounts": bool(line_total and line_total > 0),
                 },
             })
 
@@ -604,20 +805,23 @@ def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
     for raw_line in content.splitlines():
         line = normalize_spaces(raw_line)
 
-        if not looks_like_item_row(line):
+        if row_is_noise(line):
+            continue
+
+        if not looks_like_description(line):
             continue
 
         money_values = find_money_values(line)
-
-        if not money_values:
-            continue
-
         qty = find_qty_values(line) or 1.0
-        line_total = money_values[-1]
+
+        unit_price = None
+        line_total = None
 
         if len(money_values) >= 2:
             unit_price = money_values[-2]
-        else:
+            line_total = money_values[-1]
+        elif len(money_values) == 1:
+            line_total = money_values[-1]
             unit_price = round(line_total / qty, 4) if qty > 0 else None
 
         item_name = clean_item_name_from_line(line)
@@ -635,6 +839,7 @@ def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
             "ai_meta": {
                 "prodserv": None,
                 "source": "azure_document_intelligence_content",
+                "has_amounts": bool(line_total and line_total > 0),
             },
         })
 
@@ -646,9 +851,15 @@ def dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     output = []
 
     for item in items:
+        name = normalize_spaces(item.get("item_name", "")).lower()
+
+        if not name:
+            continue
+
         key = (
-            normalize_spaces(item.get("item_name", "")).lower(),
+            name,
             str(item.get("qty", "")),
+            str(item.get("unit", "")),
             str(item.get("unit_price", "")),
             str(item.get("line_total", "")),
         )
@@ -678,16 +889,24 @@ def convert_azure_result_to_purchase_json(azure_result: Dict[str, Any], category
 
     items = dedupe_items(items)
 
-    if document.get("total", 0) <= 0 and items:
+    items_with_amounts = [
+        i for i in items
+        if i.get("line_total") is not None and float(i.get("line_total") or 0) > 0
+    ]
+
+    if document.get("total", 0) <= 0 and items_with_amounts:
         document["total"] = round(
-            sum(float(i.get("line_total") or 0) for i in items),
+            sum(float(i.get("line_total") or 0) for i in items_with_amounts),
             2,
         )
 
     warnings = []
 
     if not items:
-        warnings.append("Azure Document Intelligence no detectó conceptos con importes.")
+        warnings.append("Azure Document Intelligence no detectó conceptos.")
+
+    if items and not items_with_amounts:
+        warnings.append("Se detectaron conceptos, pero no se detectaron importes confiables.")
 
     if not content:
         warnings.append("Azure Document Intelligence no devolvió contenido textual.")
@@ -701,6 +920,8 @@ def convert_azure_result_to_purchase_json(azure_result: Dict[str, Any], category
             "engine": "azure_document_intelligence",
             "pages": len(pages),
             "tables": len(tables),
+            "items_count": len(items),
+            "items_with_amounts": len(items_with_amounts),
         },
     }
 
