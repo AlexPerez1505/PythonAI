@@ -1,4 +1,3 @@
-
 import argparse
 import json
 import os
@@ -527,6 +526,26 @@ def row_is_noise(line: str) -> bool:
         "observaciones",
         "comentarios",
         "pago en una sola exhibicion",
+
+        # Encabezados de tablas CFDI / EXEL
+        "clave productos y servicios",
+        "clave producto",
+        "clave prod",
+        "no identificacion",
+        "no. identificacion",
+        "cantidad",
+        "clave unidad",
+        "descripcion",
+        "valor unitario",
+        "precio unitario",
+        "importe del concepto",
+        "descuento",
+        "impuesto",
+        "importe del impuesto",
+        "tipo factor",
+        "tasa",
+
+        # Licitaciones/anexos
         "num prog",
         "cant min",
         "cant max",
@@ -991,6 +1010,123 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
     return items
 
 
+def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[str, Any]]:
+    """
+    Fallback especial para facturas EXEL cuando Azure desplaza columnas.
+
+    Formato normal:
+    0 clave prodserv
+    1 no identificacion
+    2 cantidad
+    3 clave unidad
+    4 descripcion
+    5 valor unitario
+    6 importe concepto
+
+    Formato desplazado:
+    0 texto legal/junk
+    1 clave prodserv
+    2 no identificacion
+    3 cantidad
+    4 clave unidad
+    5 descripcion
+    6 valor unitario
+    7 importe concepto
+    """
+    items = []
+
+    for row in matrix:
+        values = [normalize_spaces(value) for value in row]
+
+        if len(values) < 7:
+            continue
+
+        line = " | ".join([value for value in values if value])
+
+        if not line:
+            continue
+
+        low_line = normalize_plain(line)
+
+        if any(header in low_line for header in [
+            "clave productos y servicios",
+            "no identificacion",
+            "no. identificacion",
+            "cantidad",
+            "clave unidad",
+            "descripcion",
+            "valor unitario",
+            "importe del concepto",
+            "importe del impuesto",
+            "tipo factor",
+            "tasa",
+        ]):
+            continue
+
+        if row_is_noise(line):
+            continue
+
+        candidates = [
+            # offset, qty, unit, desc, unit_price, line_total
+            (0, 2, 3, 4, 5, 6),
+            (1, 3, 4, 5, 6, 7),
+            (2, 4, 5, 6, 7, 8),
+        ]
+
+        selected = None
+
+        for _, qty_idx, unit_idx, desc_idx, price_idx, total_idx in candidates:
+            if max(qty_idx, unit_idx, desc_idx, price_idx, total_idx) >= len(values):
+                continue
+
+            qty = parse_qty(values[qty_idx])
+            desc = clean_product_description(values[desc_idx])
+            unit = normalize_unit(values[unit_idx]) if values[unit_idx] else "pza"
+            unit_price = extract_amount_loose(values[price_idx], prefer_last=True)
+            line_total = extract_amount_loose(values[total_idx], prefer_last=True)
+
+            if not desc:
+                continue
+
+            if row_is_noise(desc):
+                continue
+
+            if len(desc) < 5 or not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", desc):
+                continue
+
+            if qty is None:
+                continue
+
+            if unit_price is None and line_total is None:
+                continue
+
+            selected = {
+                "desc": desc,
+                "qty": qty,
+                "unit": unit,
+                "unit_price": unit_price,
+                "line_total": line_total,
+            }
+            break
+
+        if not selected:
+            continue
+
+        items.append(
+            make_item(
+                line=line,
+                desc=selected["desc"],
+                qty=selected["qty"],
+                unit=selected["unit"] or "pza",
+                unit_price=selected["unit_price"],
+                line_total=selected["line_total"],
+                source="azure_document_intelligence_table_shape",
+            )
+        )
+
+    return items
+
+
 def detect_document_header(content: str, category: str) -> Dict[str, Any]:
     text = normalize_spaces(content)
     lower = text.lower()
@@ -1227,54 +1363,11 @@ def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, An
             items.extend(header_items)
             continue
 
-        if matrix and max((len(row) for row in matrix), default=0) >= 7:
-            shape_items = []
+        shape_items = extract_exel_shape_items_from_matrix(matrix)
 
-            for row in matrix:
-                values = [normalize_spaces(value) for value in row]
-
-                if len(values) < 7:
-                    continue
-
-                line = " | ".join([value for value in values if value])
-
-                if not line:
-                    continue
-
-                if row_is_noise(line):
-                    continue
-
-                desc = clean_product_description(values[4] if len(values) > 4 else "")
-
-                if not desc:
-                    continue
-
-                if row_is_noise(desc):
-                    continue
-
-                if len(desc) < 5 or not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", desc):
-                    continue
-
-                qty = parse_qty(values[2]) or 1.0
-                unit = normalize_unit(values[3]) if len(values) > 3 and values[3] else "pza"
-                unit_price = extract_amount_loose(values[5], prefer_last=True)
-                line_total = extract_amount_loose(values[6], prefer_last=True)
-
-                shape_items.append(
-                    make_item(
-                        line=line,
-                        desc=desc,
-                        qty=qty,
-                        unit=unit or "pza",
-                        unit_price=unit_price,
-                        line_total=line_total,
-                        source="azure_document_intelligence_table_shape",
-                    )
-                )
-
-            if shape_items:
-                items.extend(shape_items)
-                continue
+        if shape_items:
+            items.extend(shape_items)
+            continue
 
         for row in matrix:
             values = [normalize_spaces(value) for value in row if normalize_spaces(value)]
@@ -1519,4 +1612,3 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         sys.exit(1)
-
