@@ -482,8 +482,6 @@ def row_is_noise(line: str) -> bool:
         "subtotal",
         "sub total",
         "total documento",
-        "iva",
-        "impuesto trasladado",
         "forma de pago",
         "metodo de pago",
         "sello",
@@ -526,6 +524,8 @@ def row_is_noise(line: str) -> bool:
         "observaciones",
         "comentarios",
         "pago en una sola exhibicion",
+
+        # Encabezados de tablas CFDI / EXEL
         "clave productos y servicios",
         "clave producto",
         "clave prod",
@@ -538,10 +538,10 @@ def row_is_noise(line: str) -> bool:
         "precio unitario",
         "importe del concepto",
         "descuento",
-        "impuesto",
         "importe del impuesto",
         "tipo factor",
-        "tasa",
+
+        # Licitaciones/anexos
         "num prog",
         "cant min",
         "cant max",
@@ -912,7 +912,23 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
         if not line:
             continue
 
-        if row_is_noise(line):
+        low_line = normalize_plain(line)
+
+        # Saltar solo encabezados reales. No usamos row_is_noise(line)
+        # porque las filas válidas de EXEL traen texto legal, impuesto, tasa, etc.
+        if any(header_text in low_line for header_text in [
+            "clave productos y servicios",
+            "no identificacion",
+            "no. identificacion",
+            "cantidad",
+            "clave unidad",
+            "descripcion",
+            "valor unitario",
+            "importe del concepto",
+            "importe del impuesto",
+            "tipo factor",
+            "tasa",
+        ]) and not re.search(r"\b[0-9]{2,6}\b", low_line):
             continue
 
         desc = values[desc_col] if desc_col < len(values) else ""
@@ -957,11 +973,14 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
         if line_total_col is not None and line_total_col < len(values):
             line_total = extract_amount_loose(values[line_total_col], prefer_last=True)
 
-        if unit_price is None and len(values) >= 6:
-            unit_price = extract_amount_loose(values[5], prefer_last=True)
+        # Fallback específico para EXEL:
+        # col 3 = cantidad, col 4 = unidad, col 5 = descripción,
+        # col 6 = valor unitario, col 7 = importe del concepto.
+        if unit_price is None and len(values) > 6:
+            unit_price = extract_amount_loose(values[6], prefer_last=True)
 
-        if line_total is None and len(values) >= 7:
-            line_total = extract_amount_loose(values[6], prefer_last=True)
+        if line_total is None and len(values) > 7:
+            line_total = extract_amount_loose(values[7], prefer_last=True)
 
         items.append(
             make_item(
@@ -979,12 +998,30 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
 
 
 def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[str, Any]]:
+    """
+    Fallback especial para facturas EXEL cuando Azure desplaza columnas.
+
+    Formato detectado en RAW:
+    0 texto legal/junk
+    1 clave prodserv
+    2 no identificacion
+    3 cantidad
+    4 clave unidad
+    5 descripcion
+    6 valor unitario
+    7 importe concepto
+    8 descuento
+    9 impuesto
+    10 importe impuesto
+    11 tipo factor
+    12 tasa
+    """
     items = []
 
     for row in matrix:
         values = [normalize_spaces(value) for value in row]
 
-        if len(values) < 7:
+        if len(values) < 8:
             continue
 
         line = " | ".join([value for value in values if value])
@@ -994,6 +1031,8 @@ def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[s
 
         low_line = normalize_plain(line)
 
+        # Saltar solo encabezados. No usar row_is_noise(line) aquí,
+        # porque las filas válidas traen texto legal, impuesto y tasa.
         if any(header in low_line for header in [
             "clave productos y servicios",
             "no identificacion",
@@ -1009,18 +1048,16 @@ def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[s
         ]):
             continue
 
-        if row_is_noise(line):
-            continue
-
         candidates = [
-            (0, 2, 3, 4, 5, 6),
-            (1, 3, 4, 5, 6, 7),
-            (2, 4, 5, 6, 7, 8),
+            # qty, unit, desc, unit_price, line_total
+            (3, 4, 5, 6, 7),  # EXEL detectado en el RAW
+            (2, 3, 4, 5, 6),
+            (4, 5, 6, 7, 8),
         ]
 
         selected = None
 
-        for _, qty_idx, unit_idx, desc_idx, price_idx, total_idx in candidates:
+        for qty_idx, unit_idx, desc_idx, price_idx, total_idx in candidates:
             if max(qty_idx, unit_idx, desc_idx, price_idx, total_idx) >= len(values):
                 continue
 
