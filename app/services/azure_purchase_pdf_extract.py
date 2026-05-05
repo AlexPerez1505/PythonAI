@@ -526,8 +526,6 @@ def row_is_noise(line: str) -> bool:
         "observaciones",
         "comentarios",
         "pago en una sola exhibicion",
-
-        # Encabezados de tablas CFDI / EXEL
         "clave productos y servicios",
         "clave producto",
         "clave prod",
@@ -544,8 +542,6 @@ def row_is_noise(line: str) -> bool:
         "importe del impuesto",
         "tipo factor",
         "tasa",
-
-        # Licitaciones/anexos
         "num prog",
         "cant min",
         "cant max",
@@ -727,24 +723,6 @@ def clean_product_description(text: str) -> str:
 
     clean = normalize_spaces(clean)
     return clean[:255]
-
-
-def looks_like_description(value: str) -> bool:
-    text = normalize_spaces(value)
-
-    if len(text) < 10:
-        return False
-
-    if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", text):
-        return False
-
-    if looks_like_unit(text):
-        return False
-
-    if row_is_noise(text):
-        return False
-
-    return True
 
 
 def choose_description_from_values(values: List[str]) -> str:
@@ -969,16 +947,6 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
         if unit_col is not None and unit_col < len(values):
             unit = normalize_unit(values[unit_col]) if values[unit_col] else ""
 
-        if not unit and has_product_unit_signal(desc):
-            unit_match = re.search(
-                r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
-                desc,
-                flags=re.I,
-            )
-
-            if unit_match:
-                unit = normalize_unit(unit_match.group(1))
-
         unit_price = None
 
         if unit_price_col is not None and unit_price_col < len(values):
@@ -1011,28 +979,6 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
 
 
 def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[str, Any]]:
-    """
-    Fallback especial para facturas EXEL cuando Azure desplaza columnas.
-
-    Formato normal:
-    0 clave prodserv
-    1 no identificacion
-    2 cantidad
-    3 clave unidad
-    4 descripcion
-    5 valor unitario
-    6 importe concepto
-
-    Formato desplazado:
-    0 texto legal/junk
-    1 clave prodserv
-    2 no identificacion
-    3 cantidad
-    4 clave unidad
-    5 descripcion
-    6 valor unitario
-    7 importe concepto
-    """
     items = []
 
     for row in matrix:
@@ -1067,7 +1013,6 @@ def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[s
             continue
 
         candidates = [
-            # offset, qty, unit, desc, unit_price, line_total
             (0, 2, 3, 4, 5, 6),
             (1, 3, 4, 5, 6, 7),
             (2, 4, 5, 6, 7, 8),
@@ -1267,26 +1212,6 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
         "tax": tax,
         "total": total,
     }
-
-
-def clean_item_name_from_line(line: str) -> str:
-    item_name = re.sub(
-        r"\$\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|\$\s*[0-9]+(?:\.[0-9]{2,4})",
-        " ",
-        line,
-    )
-
-    item_name = re.sub(
-        r"\b(?:cantidad|cant\.?|qty|precio|importe|unidad|clave|producto|servicio|descripcion|descripción)\b",
-        " ",
-        item_name,
-        flags=re.I,
-    )
-
-    item_name = re.sub(r"[\|\:\-]+", " ", item_name)
-    item_name = normalize_spaces(item_name)
-
-    return clean_product_description(item_name)
 
 
 def infer_qty_from_values(values: List[str], description: str, unit: str) -> float:
