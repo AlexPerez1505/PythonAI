@@ -1,3 +1,4 @@
+
 import argparse
 import json
 import os
@@ -112,12 +113,10 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     merged_content_parts = []
     merged_pages = []
     merged_tables = []
-
     current_page_offset = 0
 
     for result in results:
         analyze_result = result.get("analyzeResult", {})
-
         content = analyze_result.get("content", "")
         pages = analyze_result.get("pages", [])
         tables = analyze_result.get("tables", [])
@@ -233,6 +232,11 @@ def normalize_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+def normalize_plain(text: str) -> str:
+    text = normalize_spaces(text).lower()
+    return text.translate(str.maketrans("áéíóúüñ", "aeiouun"))
+
+
 def money_to_float(value: Optional[str]) -> Optional[float]:
     if value is None:
         return None
@@ -259,12 +263,6 @@ def money_to_float(value: Optional[str]) -> Optional[float]:
 
 
 def extract_amount_loose(value: str, prefer_last: bool = True) -> Optional[float]:
-    """
-    Extrae montos desde celdas sucias de Azure, por ejemplo:
-    "6002035, 202.64" -> 202.64
-    "51, 11/15/25] 34,854.08" -> 34854.08
-    Evita porcentajes y tasas como 0.16 si la celda no pertenece a columna de importe/precio.
-    """
     text = normalize_spaces(value)
 
     if not text:
@@ -279,12 +277,12 @@ def extract_amount_loose(value: str, prefer_last: bool = True) -> Optional[float
         return None
 
     parsed = []
-    for c in candidates:
-        v = money_to_float(c)
-        if v is None:
-            continue
 
-        parsed.append(v)
+    for candidate in candidates:
+        value_float = money_to_float(candidate)
+
+        if value_float is not None:
+            parsed.append(value_float)
 
     if not parsed:
         return None
@@ -373,15 +371,15 @@ def parse_number(value: str) -> Optional[float]:
 
 
 def parse_qty(value: str) -> Optional[float]:
-    n = parse_number(value)
+    number = parse_number(value)
 
-    if n is None:
+    if number is None:
         return None
 
-    if n <= 0:
+    if number <= 0:
         return None
 
-    return round(n, 3)
+    return round(number, 3)
 
 
 def find_qty_values(text: str) -> Optional[float]:
@@ -419,21 +417,6 @@ def find_qty_values(text: str) -> Optional[float]:
     return None
 
 
-def looks_like_unit(value: str) -> bool:
-    text = normalize_spaces(value).upper().replace(".", "")
-
-    units = {
-        "PIEZA", "PZA", "PZ", "CAJA", "CAJAS", "PAQUETE", "PAQUETES",
-        "PQT", "PQTE", "KG", "KILO", "KILOS", "GRAMO", "GRAMOS", "GR",
-        "LITRO", "LITROS", "LT", "SERVICIO", "SERVICIOS", "M",
-        "METRO", "METROS", "ROLLO", "ROLLOS", "BOLSA", "BOLSAS",
-        "CUBETA", "CUBETAS", "JUEGO", "JUEGOS", "JGO", "LOTE", "LOTES",
-        "UNIDAD", "UNIDADES", "PAR", "PARES", "POTE", "BOTE", "XPK", "H87"
-    }
-
-    return text in units
-
-
 def normalize_unit(value: str) -> str:
     text = normalize_spaces(value).upper().replace(".", "")
 
@@ -442,10 +425,12 @@ def normalize_unit(value: str) -> str:
         "PZ": "PIEZA",
         "UNIDAD": "PIEZA",
         "UNIDADES": "PIEZA",
+        "H87": "PIEZA",
         "CAJAS": "CAJA",
         "PAQUETES": "PAQUETE",
         "PQT": "PAQUETE",
         "PQTE": "PAQUETE",
+        "XPK": "PAQUETE",
         "KILO": "KG",
         "KILOS": "KG",
         "GRAMOS": "GR",
@@ -460,15 +445,36 @@ def normalize_unit(value: str) -> str:
         "JGO": "JUEGO",
         "LOTES": "LOTE",
         "PARES": "PAR",
-        "H87": "PIEZA",
-        "XPK": "PAQUETE",
     }
 
     return aliases.get(text, text)
 
 
+def looks_like_unit(value: str) -> bool:
+    text = normalize_unit(value)
+
+    return text in {
+        "PIEZA",
+        "CAJA",
+        "PAQUETE",
+        "KG",
+        "GR",
+        "LT",
+        "SERVICIO",
+        "M",
+        "ROLLO",
+        "BOLSA",
+        "CUBETA",
+        "JUEGO",
+        "LOTE",
+        "PAR",
+        "POTE",
+        "BOTE",
+    }
+
+
 def row_is_noise(line: str) -> bool:
-    low = normalize_spaces(line).lower()
+    low = normalize_plain(line)
 
     if not low or len(low) < 4:
         return True
@@ -481,7 +487,6 @@ def row_is_noise(line: str) -> bool:
         "impuesto trasladado",
         "forma de pago",
         "metodo de pago",
-        "método de pago",
         "sello",
         "cadena original",
         "uuid",
@@ -489,16 +494,12 @@ def row_is_noise(line: str) -> bool:
         "emisor",
         "receptor",
         "regimen fiscal",
-        "régimen fiscal",
-        "lugar expedición",
-        "lugar de expedición",
         "lugar expedicion",
-        "lugar de expedicion",
         "tipo de cambio",
         "moneda",
         "uso cfdi",
         "folio fiscal",
-        "no. certificado",
+        "no certificado",
         "certificado sat",
         "fecha timbrado",
         "fecha de timbrado",
@@ -508,7 +509,6 @@ def row_is_noise(line: str) -> bool:
         "cliente",
         "proveedor",
         "domicilio",
-        "código postal",
         "codigo postal",
         "expedido en",
         "serie",
@@ -517,9 +517,6 @@ def row_is_noise(line: str) -> bool:
         "depositario",
         "detallados en esta factura",
         "el dominio de expedicion",
-        "el dominio de expedición",
-        "jose aaron",
-        "josé aaron",
         "exel del norte",
         "gel exel del norte",
         "fecha",
@@ -529,36 +526,25 @@ def row_is_noise(line: str) -> bool:
         "banco",
         "observaciones",
         "comentarios",
-        "pago en una sola exhibición",
         "pago en una sola exhibicion",
-        "núm. prog",
-        "num. prog",
-        "cant. min",
-        "cant. max",
+        "num prog",
+        "cant min",
+        "cant max",
         "unidad de medida",
-        "descripción del bien",
         "descripcion del bien",
         "eventos | fecha",
         "fecha y hora",
         "junta de aclaraciones",
         "acto de apertura",
-        "emisión de fallo",
         "emision de fallo",
-        "recepción de dudas",
         "recepcion de dudas",
-        "proposición técnica",
         "proposicion tecnica",
-        "proposición económica",
         "proposicion economica",
-        "acreditación de la personalidad",
         "acreditacion de la personalidad",
-        "declaración de integridad",
         "declaracion de integridad",
         "bajo protesta de decir verdad",
-        "estratificación como micro",
         "estratificacion como micro",
         "tratado de libre comercio",
-        "contratación pública",
         "contratacion publica",
     ]
 
@@ -568,14 +554,13 @@ def row_is_noise(line: str) -> bool:
     if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}t?[0-9:.\sampm\.]*", low):
         return True
 
-    if re.fullmatch(r"[a-zñ&]{3,4}[0-9]{6}[a-z0-9]{3}", low, flags=re.I):
+    if re.fullmatch(r"[a-z&]{3,4}[0-9]{6}[a-z0-9]{3}", low, flags=re.I):
         return True
 
     if re.match(r"^anexo\s+[a-z0-9]+\s*\|", low, flags=re.I):
         return True
 
     admin_words = [
-        "expedición",
         "expedicion",
         "receptor",
         "emisor",
@@ -594,7 +579,7 @@ def row_is_noise(line: str) -> bool:
 
 
 def has_product_unit_signal(text: str) -> bool:
-    low = normalize_spaces(text).lower()
+    low = normalize_plain(text)
 
     product_units = [
         "pza",
@@ -624,9 +609,9 @@ def has_product_unit_signal(text: str) -> bool:
 
 def looks_like_real_product_description(text: str) -> bool:
     clean = normalize_spaces(text)
-    low = clean.lower()
+    low = normalize_plain(clean)
 
-    if len(clean) < 8:
+    if len(clean) < 5:
         return False
 
     if row_is_noise(clean):
@@ -637,12 +622,10 @@ def looks_like_real_product_description(text: str) -> bool:
 
     product_words = [
         "boligrafo",
-        "bolígrafo",
         "engrapadora",
         "folder",
         "guillotina",
         "lapiz",
-        "lápiz",
         "marcador",
         "papel",
         "pza",
@@ -668,7 +651,6 @@ def looks_like_real_product_description(text: str) -> bool:
         "perforadora",
         "sacapuntas",
         "pintarron",
-        "pintarrón",
         "servilleta",
         "block",
         "broche",
@@ -687,13 +669,19 @@ def looks_like_real_product_description(text: str) -> bool:
         "regla",
         "separadores",
         "tarjeta",
-        "película",
         "pelicula",
         "cargo envio",
-        "cargo envío",
         "estafeta",
         "janel",
         "nextep",
+        "revistero",
+        "malla",
+        "detector",
+        "billetes",
+        "adhesivo",
+        "ceblofan",
+        "celofan",
+        "trans janel",
     ]
 
     if any(word in low for word in product_words):
@@ -775,8 +763,7 @@ def choose_unit_from_values(values: List[str]) -> str:
 
 
 def normalize_header_cell(text: str) -> str:
-    text = normalize_spaces(text).lower()
-    text = text.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+    text = normalize_plain(text)
     text = text.replace(".", "")
     return text
 
@@ -792,7 +779,7 @@ def detect_header_map(matrix: List[List[str]]) -> Dict[str, Any]:
         "tax_amount": None,
     }
 
-    for row_idx, row in enumerate(matrix[:8]):
+    for row_idx, row in enumerate(matrix[:10]):
         score = 0
         current = dict(best)
         current["row"] = row_idx
@@ -807,7 +794,7 @@ def detect_header_map(matrix: List[List[str]]) -> Dict[str, Any]:
                 current["desc"] = col_idx
                 score += 4
 
-            if "cantidad" in cell or cell in {"cant", "cant "}:
+            if "cantidad" in cell or cell in {"cant", "qty"}:
                 current["qty"] = col_idx
                 score += 3
 
@@ -836,6 +823,69 @@ def detect_header_map(matrix: List[List[str]]) -> Dict[str, Any]:
             return current
 
     return best
+
+
+def table_to_matrix(table: Dict[str, Any]) -> List[List[str]]:
+    rows = int(table.get("rowCount", 0) or 0)
+    cols = int(table.get("columnCount", 0) or 0)
+
+    matrix = [["" for _ in range(cols)] for _ in range(rows)]
+
+    for cell in table.get("cells", []) or []:
+        r = int(cell.get("rowIndex", 0) or 0)
+        c = int(cell.get("columnIndex", 0) or 0)
+        rs = int(cell.get("rowSpan", 1) or 1)
+        cs = int(cell.get("columnSpan", 1) or 1)
+        content = normalize_spaces(cell.get("content", ""))
+
+        for rr in range(r, min(r + rs, rows)):
+            for cc in range(c, min(c + cs, cols)):
+                if not matrix[rr][cc]:
+                    matrix[rr][cc] = content
+
+    return matrix
+
+
+def make_item(
+    line: str,
+    desc: str,
+    qty: float,
+    unit: str,
+    unit_price: Optional[float],
+    line_total: Optional[float],
+    source: str,
+) -> Dict[str, Any]:
+    if unit_price is not None and line_total is not None and qty > 0:
+        expected = round(unit_price * qty, 2)
+
+        if line_total <= 1 and unit_price > 1:
+            line_total = expected
+
+        if abs(expected - line_total) > max(2.0, line_total * 0.08):
+            calculated_unit = round(line_total / qty, 4)
+
+            if calculated_unit > 0:
+                unit_price = calculated_unit
+
+    if line_total is None and unit_price is not None and qty > 0:
+        line_total = round(unit_price * qty, 2)
+
+    if unit_price is None and line_total is not None and qty > 0:
+        unit_price = round(line_total / qty, 4)
+
+    return {
+        "item_raw": line,
+        "item_name": clean_product_description(desc),
+        "qty": qty,
+        "unit": unit or "pza",
+        "unit_price": unit_price,
+        "line_total": line_total,
+        "ai_meta": {
+            "prodserv": None,
+            "source": source,
+            "has_amounts": bool(line_total and line_total > 0),
+        },
+    }
 
 
 def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -877,59 +927,66 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
         if row_is_noise(desc):
             continue
 
-        if not looks_like_real_product_description(desc):
+        if len(desc) < 5 or not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", desc):
+            continue
+
+        desc_low = normalize_plain(desc)
+
+        if any(word in desc_low for word in [
+            "descripcion",
+            "valor unitario",
+            "importe del concepto",
+            "clave unidad",
+            "clave productos",
+            "servicios",
+        ]):
             continue
 
         qty_raw = values[qty_col] if qty_col < len(values) else ""
         qty = parse_qty(qty_raw) or 1.0
 
         unit = ""
+
         if unit_col is not None and unit_col < len(values):
             unit = normalize_unit(values[unit_col]) if values[unit_col] else ""
 
         if not unit and has_product_unit_signal(desc):
-            m = re.search(
+            unit_match = re.search(
                 r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
                 desc,
                 flags=re.I,
             )
-            if m:
-                unit = normalize_unit(m.group(1))
+
+            if unit_match:
+                unit = normalize_unit(unit_match.group(1))
 
         unit_price = None
+
         if unit_price_col is not None and unit_price_col < len(values):
             unit_price = extract_amount_loose(values[unit_price_col], prefer_last=True)
 
         line_total = None
+
         if line_total_col is not None and line_total_col < len(values):
             line_total = extract_amount_loose(values[line_total_col], prefer_last=True)
 
-        if unit_price is not None and line_total is not None:
-            if line_total <= 1 and unit_price > 1 and qty > 0:
-                line_total = round(unit_price * qty, 2)
+        if unit_price is None and len(values) >= 6:
+            unit_price = extract_amount_loose(values[5], prefer_last=True)
 
-            if line_total < unit_price and qty > 1:
-                line_total = round(unit_price * qty, 2)
+        if line_total is None and len(values) >= 7:
+            line_total = extract_amount_loose(values[6], prefer_last=True)
 
-        if line_total is None and unit_price is not None and qty > 0:
-            line_total = round(unit_price * qty, 2)
-
-        if unit_price is None and line_total is not None and qty > 0:
-            unit_price = round(line_total / qty, 4)
-
-        items.append({
-            "item_raw": line,
-            "item_name": desc[:255],
-            "qty": qty,
-            "unit": unit or "pza",
-            "unit_price": unit_price,
-            "line_total": line_total,
-            "ai_meta": {
-                "prodserv": None,
-                "source": "azure_document_intelligence_table_header",
-                "has_amounts": bool(line_total and line_total > 0),
-            },
-        })
+        items.append(
+            make_item(
+                line=line,
+                desc=desc,
+                qty=qty,
+                unit=unit or "pza",
+                unit_price=unit_price,
+                line_total=line_total,
+                source="azure_document_intelligence_table_header",
+            )
+        )
 
     return items
 
@@ -972,7 +1029,6 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
         document_type = "ticket"
 
     date_value = None
-
     date_match = re.search(
         r"(\d{4}[-/]\d{2}[-/]\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2})?))?",
         text,
@@ -1008,9 +1064,10 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
     ]
 
     for pattern in subtotal_patterns:
-        m = re.search(pattern, text, flags=re.I)
-        if m:
-            subtotal = money_to_float(m.group(1)) or 0
+        match = re.search(pattern, text, flags=re.I)
+
+        if match:
+            subtotal = money_to_float(match.group(1)) or 0
             break
 
     tax_patterns = [
@@ -1020,9 +1077,10 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
     ]
 
     for pattern in tax_patterns:
-        m = re.search(pattern, text, flags=re.I)
-        if m:
-            tax = money_to_float(m.group(1)) or 0
+        match = re.search(pattern, text, flags=re.I)
+
+        if match:
+            tax = money_to_float(match.group(1)) or 0
             break
 
     total_matches = re.findall(
@@ -1038,7 +1096,7 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
     lines = [normalize_spaces(line) for line in content.splitlines() if normalize_spaces(line)]
 
     for line in lines[:80]:
-        low = line.lower()
+        low = normalize_plain(line)
 
         if any(skip in low for skip in [
             "factura",
@@ -1052,7 +1110,6 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
             "certificado",
             "sello",
             "cadena original",
-            "gobierno de méxico",
             "gobierno de mexico",
         ]):
             continue
@@ -1074,28 +1131,6 @@ def detect_document_header(content: str, category: str) -> Dict[str, Any]:
         "tax": tax,
         "total": total,
     }
-
-
-def table_to_matrix(table: Dict[str, Any]) -> List[List[str]]:
-    rows = int(table.get("rowCount", 0) or 0)
-    cols = int(table.get("columnCount", 0) or 0)
-
-    matrix = [["" for _ in range(cols)] for _ in range(rows)]
-
-    for cell in table.get("cells", []) or []:
-        r = int(cell.get("rowIndex", 0) or 0)
-        c = int(cell.get("columnIndex", 0) or 0)
-        rs = int(cell.get("rowSpan", 1) or 1)
-        cs = int(cell.get("columnSpan", 1) or 1)
-
-        content = normalize_spaces(cell.get("content", ""))
-
-        for rr in range(r, min(r + rs, rows)):
-            for cc in range(c, min(c + cs, cols)):
-                if not matrix[rr][cc]:
-                    matrix[rr][cc] = content
-
-    return matrix
 
 
 def clean_item_name_from_line(line: str) -> str:
@@ -1130,15 +1165,15 @@ def infer_qty_from_values(values: List[str], description: str, unit: str) -> flo
         if unit and normalize_unit(text) == unit:
             continue
 
-        n = parse_number(text)
+        number = parse_number(text)
 
-        if n is None:
+        if number is None:
             continue
 
-        if n <= 0:
+        if number <= 0:
             continue
 
-        numeric_cells.append(n)
+        numeric_cells.append(number)
 
     if not numeric_cells:
         return 1.0
@@ -1173,13 +1208,6 @@ def infer_amounts_from_values(values: List[str], qty: float) -> Dict[str, Option
         unit_price = amount_cells[0]
         line_total = round(unit_price * qty, 2) if qty > 0 else None
 
-    if unit_price is not None and line_total is not None:
-        if line_total <= 1 and unit_price > 1 and qty > 0:
-            line_total = round(unit_price * qty, 2)
-
-        if line_total < unit_price and qty > 1:
-            line_total = round(unit_price * qty, 2)
-
     return {
         "unit_price": unit_price,
         "line_total": line_total,
@@ -1199,8 +1227,57 @@ def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, An
             items.extend(header_items)
             continue
 
+        if matrix and max((len(row) for row in matrix), default=0) >= 7:
+            shape_items = []
+
+            for row in matrix:
+                values = [normalize_spaces(value) for value in row]
+
+                if len(values) < 7:
+                    continue
+
+                line = " | ".join([value for value in values if value])
+
+                if not line:
+                    continue
+
+                if row_is_noise(line):
+                    continue
+
+                desc = clean_product_description(values[4] if len(values) > 4 else "")
+
+                if not desc:
+                    continue
+
+                if row_is_noise(desc):
+                    continue
+
+                if len(desc) < 5 or not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", desc):
+                    continue
+
+                qty = parse_qty(values[2]) or 1.0
+                unit = normalize_unit(values[3]) if len(values) > 3 and values[3] else "pza"
+                unit_price = extract_amount_loose(values[5], prefer_last=True)
+                line_total = extract_amount_loose(values[6], prefer_last=True)
+
+                shape_items.append(
+                    make_item(
+                        line=line,
+                        desc=desc,
+                        qty=qty,
+                        unit=unit or "pza",
+                        unit_price=unit_price,
+                        line_total=line_total,
+                        source="azure_document_intelligence_table_shape",
+                    )
+                )
+
+            if shape_items:
+                items.extend(shape_items)
+                continue
+
         for row in matrix:
-            values = [normalize_spaces(v) for v in row if normalize_spaces(v)]
+            values = [normalize_spaces(value) for value in row if normalize_spaces(value)]
 
             if not values:
                 continue
@@ -1224,33 +1301,29 @@ def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, An
             unit = choose_unit_from_values(values)
 
             if not unit and has_product_unit_signal(item_name):
-                m = re.search(
+                unit_match = re.search(
                     r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
                     item_name,
                     flags=re.I,
                 )
-                if m:
-                    unit = normalize_unit(m.group(1))
+
+                if unit_match:
+                    unit = normalize_unit(unit_match.group(1))
 
             qty = infer_qty_from_values(values, item_name, unit)
             amounts = infer_amounts_from_values(values, qty)
 
-            unit_price = amounts["unit_price"]
-            line_total = amounts["line_total"]
-
-            items.append({
-                "item_raw": line,
-                "item_name": item_name[:255],
-                "qty": qty,
-                "unit": unit or "pza",
-                "unit_price": unit_price,
-                "line_total": line_total,
-                "ai_meta": {
-                    "prodserv": None,
-                    "source": "azure_document_intelligence_table",
-                    "has_amounts": bool(line_total and line_total > 0),
-                },
-            })
+            items.append(
+                make_item(
+                    line=line,
+                    desc=item_name,
+                    qty=qty,
+                    unit=unit or "pza",
+                    unit_price=amounts["unit_price"],
+                    line_total=amounts["line_total"],
+                    source="azure_document_intelligence_table",
+                )
+            )
 
     return items
 
@@ -1269,7 +1342,6 @@ def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
 
         money_values = find_money_values(line)
         qty = find_qty_values(line) or 1.0
-
         unit_price = None
         line_total = None
 
@@ -1279,13 +1351,6 @@ def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
         elif len(money_values) == 1:
             unit_price = money_values[-1]
             line_total = round(unit_price * qty, 2) if qty > 0 else None
-
-        if unit_price is not None and line_total is not None:
-            if line_total <= 1 and unit_price > 1 and qty > 0:
-                line_total = round(unit_price * qty, 2)
-
-            if line_total < unit_price and qty > 1:
-                line_total = round(unit_price * qty, 2)
 
         item_name = clean_product_description(line)
 
@@ -1298,27 +1363,26 @@ def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
         unit = ""
 
         if has_product_unit_signal(item_name):
-            m = re.search(
+            unit_match = re.search(
                 r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
                 item_name,
                 flags=re.I,
             )
-            if m:
-                unit = normalize_unit(m.group(1))
 
-        items.append({
-            "item_raw": line,
-            "item_name": item_name[:255],
-            "qty": qty,
-            "unit": unit or "pza",
-            "unit_price": unit_price,
-            "line_total": line_total,
-            "ai_meta": {
-                "prodserv": None,
-                "source": "azure_document_intelligence_content",
-                "has_amounts": bool(line_total and line_total > 0),
-            },
-        })
+            if unit_match:
+                unit = normalize_unit(unit_match.group(1))
+
+        items.append(
+            make_item(
+                line=line,
+                desc=item_name,
+                qty=qty,
+                unit=unit or "pza",
+                unit_price=unit_price,
+                line_total=line_total,
+                source="azure_document_intelligence_content",
+            )
+        )
 
     return items
 
@@ -1367,13 +1431,14 @@ def convert_azure_result_to_purchase_json(azure_result: Dict[str, Any], category
     items = dedupe_items(items)
 
     items_with_amounts = [
-        i for i in items
-        if i.get("line_total") is not None and float(i.get("line_total") or 0) > 0
+        item
+        for item in items
+        if item.get("line_total") is not None and float(item.get("line_total") or 0) > 0
     ]
 
     if document.get("subtotal", 0) <= 0 and items_with_amounts:
         document["subtotal"] = round(
-            sum(float(i.get("line_total") or 0) for i in items_with_amounts),
+            sum(float(item.get("line_total") or 0) for item in items_with_amounts),
             2,
         )
 
@@ -1423,8 +1488,8 @@ def main():
     if not os.path.isfile(args.file):
         raise Exception(f"No existe el archivo PDF: {args.file}")
 
-    with open(args.file, "rb") as f:
-        file_bytes = f.read()
+    with open(args.file, "rb") as file:
+        file_bytes = file.read()
 
     azure_result = analyze_pdf_with_auto_split(
         file_bytes=file_bytes,
@@ -1454,3 +1519,4 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         sys.exit(1)
+
