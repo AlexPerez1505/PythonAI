@@ -273,7 +273,6 @@ def looks_like_money_cell(value: str) -> bool:
     if "$" in text:
         return True
 
-    # 123.45, 1,234.56
     if re.fullmatch(r"[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})", text):
         return True
 
@@ -295,7 +294,6 @@ def find_money_values(text: str) -> List[float]:
         return []
 
     values = []
-
     parts = re.split(r"\s*\|\s*|\t+", text)
 
     for part in parts:
@@ -304,7 +302,6 @@ def find_money_values(text: str) -> List[float]:
         if amount is not None:
             values.append(amount)
 
-    # Fallback solo para valores con símbolo $, no para medidas.
     if not values:
         matches = re.findall(
             r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|[0-9]+(?:\.[0-9]{2,4}))",
@@ -384,11 +381,11 @@ def looks_like_unit(value: str) -> bool:
 
     units = {
         "PIEZA", "PZA", "PZ", "CAJA", "CAJAS", "PAQUETE", "PAQUETES",
-        "PQT", "KG", "KILO", "KILOS", "GRAMO", "GRAMOS", "GR",
+        "PQT", "PQTE", "KG", "KILO", "KILOS", "GRAMO", "GRAMOS", "GR",
         "LITRO", "LITROS", "LT", "SERVICIO", "SERVICIOS", "M",
         "METRO", "METROS", "ROLLO", "ROLLOS", "BOLSA", "BOLSAS",
-        "CUBETA", "CUBETAS", "JUEGO", "JUEGOS", "LOTE", "LOTES",
-        "UNIDAD", "UNIDADES", "PAR", "PARES"
+        "CUBETA", "CUBETAS", "JUEGO", "JUEGOS", "JGO", "LOTE", "LOTES",
+        "UNIDAD", "UNIDADES", "PAR", "PARES", "POTE", "BOTE"
     }
 
     return text in units
@@ -405,6 +402,7 @@ def normalize_unit(value: str) -> str:
         "CAJAS": "CAJA",
         "PAQUETES": "PAQUETE",
         "PQT": "PAQUETE",
+        "PQTE": "PAQUETE",
         "KILO": "KG",
         "KILOS": "KG",
         "GRAMOS": "GR",
@@ -416,11 +414,265 @@ def normalize_unit(value: str) -> str:
         "BOLSAS": "BOLSA",
         "CUBETAS": "CUBETA",
         "JUEGOS": "JUEGO",
+        "JGO": "JUEGO",
         "LOTES": "LOTE",
         "PARES": "PAR",
     }
 
     return aliases.get(text, text)
+
+
+def row_is_noise(line: str) -> bool:
+    low = normalize_spaces(line).lower()
+
+    if not low or len(low) < 4:
+        return True
+
+    noise_phrases = [
+        "subtotal",
+        "total",
+        "iva",
+        "impuesto",
+        "tax",
+        "forma de pago",
+        "metodo de pago",
+        "método de pago",
+        "sello",
+        "cadena original",
+        "uuid",
+        "certificado",
+        "emisor",
+        "receptor",
+        "regimen fiscal",
+        "régimen fiscal",
+        "lugar expedición",
+        "lugar de expedición",
+        "lugar expedicion",
+        "lugar de expedicion",
+        "tipo de cambio",
+        "moneda",
+        "uso cfdi",
+        "régimen",
+        "regimen",
+        "folio fiscal",
+        "no. certificado",
+        "certificado sat",
+        "fecha timbrado",
+        "fecha de timbrado",
+        "rfc",
+        "orden de venta",
+        "orden venta",
+        "cliente",
+        "proveedor",
+        "domicilio",
+        "código postal",
+        "codigo postal",
+        "expedido en",
+        "serie",
+        "folio",
+        "factura",
+        "factura,",
+        "depositario",
+        "detallados en esta factura",
+        "el dominio de expedicion",
+        "el dominio de expedición",
+        "jose aaron",
+        "josé aaron",
+        "exel del norte",
+        "gel exel del norte",
+        "fecha",
+        "hora",
+        "condiciones de pago",
+        "cuenta de pago",
+        "banco",
+        "observaciones",
+        "comentarios",
+        "pago en una sola exhibición",
+        "pago en una sola exhibicion",
+        "núm. prog",
+        "num. prog",
+        "cant. min",
+        "cant. max",
+        "unidad de medida",
+        "descripción del bien",
+        "descripcion del bien",
+        "eventos | fecha",
+        "fecha y hora",
+        "junta de aclaraciones",
+        "acto de apertura",
+        "emisión de fallo",
+        "emision de fallo",
+        "recepción de dudas",
+        "recepcion de dudas",
+        "proposición técnica",
+        "proposicion tecnica",
+        "proposición económica",
+        "proposicion economica",
+        "acreditación de la personalidad",
+        "acreditacion de la personalidad",
+        "declaración de integridad",
+        "declaracion de integridad",
+        "bajo protesta de decir verdad",
+        "estratificación como micro",
+        "estratificacion como micro",
+        "tratado de libre comercio",
+        "contratación pública",
+        "contratacion publica",
+    ]
+
+    if any(phrase in low for phrase in noise_phrases):
+        return True
+
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}t?[0-9:.\sampm\.]*", low):
+        return True
+
+    if re.fullmatch(r"[a-zñ&]{3,4}[0-9]{6}[a-z0-9]{3}", low, flags=re.I):
+        return True
+
+    if re.match(r"^anexo\s+[a-z0-9]+\s*\|", low, flags=re.I):
+        return True
+
+    admin_words = [
+        "expedición",
+        "expedicion",
+        "receptor",
+        "emisor",
+        "fiscal",
+        "factura",
+        "certificado",
+        "timbre",
+        "sat",
+        "cfdi",
+    ]
+
+    if any(word in low for word in admin_words):
+        return True
+
+    return False
+
+
+def has_product_unit_signal(text: str) -> bool:
+    low = normalize_spaces(text).lower()
+
+    product_units = [
+        "pza",
+        "pieza",
+        "pz",
+        "pqte",
+        "pqt",
+        "paquete",
+        "pote",
+        "caja",
+        "cja",
+        "bolsa",
+        "bote",
+        "rollo",
+        "lt",
+        "litro",
+        "kg",
+        "kilo",
+        "servicio",
+        "jgo",
+        "juego",
+        "par",
+    ]
+
+    return any(re.search(rf"\b{re.escape(unit)}\b", low) for unit in product_units)
+
+
+def looks_like_real_product_description(text: str) -> bool:
+    clean = normalize_spaces(text)
+    low = clean.lower()
+
+    if len(clean) < 8:
+        return False
+
+    if row_is_noise(clean):
+        return False
+
+    if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", clean):
+        return False
+
+    product_words = [
+        "boligrafo",
+        "bolígrafo",
+        "engrapadora",
+        "folder",
+        "guillotina",
+        "lapiz",
+        "lápiz",
+        "marcador",
+        "papel",
+        "pza",
+        "pieza",
+        "pqte",
+        "pqt",
+        "paquete",
+        "pote",
+        "caja",
+        "cinta",
+        "clip",
+        "grapa",
+        "libreta",
+        "sobre",
+        "protector",
+        "calculadora",
+        "corrector",
+        "pegamento",
+        "mica",
+        "cartulina",
+        "tijera",
+        "borrador",
+        "perforadora",
+        "sacapuntas",
+        "pintarron",
+        "pintarrón",
+        "servilleta",
+        "block",
+        "broche",
+        "charola",
+        "cutter",
+        "dedal",
+        "desengrapadora",
+        "cera",
+        "cubierta",
+        "hojas",
+        "goma",
+        "ligas",
+        "pines",
+        "tachuelas",
+        "organizador",
+        "regla",
+        "separadores",
+        "tarjeta",
+        "película",
+        "pelicula",
+    ]
+
+    if any(word in low for word in product_words):
+        return True
+
+    if has_product_unit_signal(clean):
+        return True
+
+    return False
+
+
+def clean_product_description(text: str) -> str:
+    clean = normalize_spaces(text)
+
+    clean = re.sub(r"^\s*[0-9]+\s*\|\s*", "", clean)
+    clean = re.sub(r"^\s*[0-9]+\s+", "", clean)
+
+    clean = re.sub(
+        r"\b(?:concepto|descripción|descripcion|cantidad|precio|importe|total|unidad)\b",
+        " ",
+        clean,
+        flags=re.I,
+    )
+
+    clean = normalize_spaces(clean)
+    return clean[:255]
 
 
 def looks_like_description(value: str) -> bool:
@@ -435,39 +687,36 @@ def looks_like_description(value: str) -> bool:
     if looks_like_unit(text):
         return False
 
-    bad = text.lower()
-
-    if any(word in bad for word in [
-        "subtotal",
-        "total",
-        "iva",
-        "impuesto",
-        "sello",
-        "uuid",
-        "certificado",
-        "forma de pago",
-        "método de pago",
-        "metodo de pago",
-        "emisor",
-        "receptor",
-        "rfc",
-        "régimen fiscal",
-        "regimen fiscal",
-        "lugar de expedición",
-        "lugar de expedicion",
-    ]):
+    if row_is_noise(text):
         return False
 
     return True
 
 
 def choose_description_from_values(values: List[str]) -> str:
-    descriptions = [v for v in values if looks_like_description(v)]
+    candidates = []
 
-    if not descriptions:
+    for value in values:
+        text = normalize_spaces(value)
+
+        if not text:
+            continue
+
+        if row_is_noise(text):
+            continue
+
+        if looks_like_unit(text):
+            continue
+
+        if looks_like_real_product_description(text):
+            candidates.append(text)
+
+    if not candidates:
         return ""
 
-    return max(descriptions, key=len)[:255]
+    selected = max(candidates, key=len)
+
+    return clean_product_description(selected)
 
 
 def choose_unit_from_values(values: List[str]) -> str:
@@ -637,34 +886,6 @@ def table_to_matrix(table: Dict[str, Any]) -> List[List[str]]:
     return matrix
 
 
-def row_is_noise(line: str) -> bool:
-    low = line.lower()
-
-    if not line or len(line) < 4:
-        return True
-
-    return any(word in low for word in [
-        "subtotal",
-        "total",
-        "iva",
-        "impuesto",
-        "tax",
-        "forma de pago",
-        "metodo de pago",
-        "método de pago",
-        "sello",
-        "cadena original",
-        "uuid",
-        "certificado",
-        "emisor",
-        "receptor",
-        "regimen fiscal",
-        "régimen fiscal",
-        "lugar de expedición",
-        "lugar de expedicion",
-    ])
-
-
 def clean_item_name_from_line(line: str) -> str:
     item_name = re.sub(
         r"\$\s*[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|\$\s*[0-9]+(?:\.[0-9]{2,4})",
@@ -682,7 +903,7 @@ def clean_item_name_from_line(line: str) -> str:
     item_name = re.sub(r"[\|\:\-]+", " ", item_name)
     item_name = normalize_spaces(item_name)
 
-    return item_name[:255]
+    return clean_product_description(item_name)
 
 
 def infer_qty_from_values(values: List[str], description: str, unit: str) -> float:
@@ -702,7 +923,6 @@ def infer_qty_from_values(values: List[str], description: str, unit: str) -> flo
         if n is None:
             continue
 
-        # Evita agarrar decimales/medidas como cantidad.
         if n <= 0:
             continue
 
@@ -711,9 +931,6 @@ def infer_qty_from_values(values: List[str], description: str, unit: str) -> flo
     if not numeric_cells:
         return 1.0
 
-    # En muchos formatos:
-    # partida | cantidad | clave | unidad | descripción
-    # Si hay varios enteros, el segundo suele ser cantidad.
     if len(numeric_cells) >= 2:
         qty = numeric_cells[1]
     else:
@@ -741,10 +958,15 @@ def infer_amounts_from_values(values: List[str], qty: float) -> Dict[str, Option
         unit_price = amount_cells[-2]
         line_total = amount_cells[-1]
     elif len(amount_cells) == 1:
-        line_total = amount_cells[0]
+        unit_price = amount_cells[0]
+        line_total = round(unit_price * qty, 2) if qty > 0 else None
 
-        if qty > 0:
-            unit_price = round(line_total / qty, 4)
+    if unit_price is not None and line_total is not None:
+        if line_total <= 1 and unit_price > 1 and qty > 0:
+            line_total = round(unit_price * qty, 2)
+
+        if line_total < unit_price and qty > 1:
+            line_total = round(unit_price * qty, 2)
 
     return {
         "unit_price": unit_price,
@@ -774,9 +996,24 @@ def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, An
             if not item_name:
                 continue
 
-            unit = choose_unit_from_values(values)
-            qty = infer_qty_from_values(values, item_name, unit)
+            if row_is_noise(item_name):
+                continue
 
+            if not looks_like_real_product_description(item_name):
+                continue
+
+            unit = choose_unit_from_values(values)
+
+            if not unit and has_product_unit_signal(item_name):
+                m = re.search(
+                    r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
+                    item_name,
+                    flags=re.I,
+                )
+                if m:
+                    unit = normalize_unit(m.group(1))
+
+            qty = infer_qty_from_values(values, item_name, unit)
             amounts = infer_amounts_from_values(values, qty)
 
             unit_price = amounts["unit_price"]
@@ -786,7 +1023,7 @@ def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, An
                 "item_raw": line,
                 "item_name": item_name[:255],
                 "qty": qty,
-                "unit": unit,
+                "unit": unit or "pza",
                 "unit_price": unit_price,
                 "line_total": line_total,
                 "ai_meta": {
@@ -808,7 +1045,7 @@ def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
         if row_is_noise(line):
             continue
 
-        if not looks_like_description(line):
+        if not looks_like_real_product_description(line):
             continue
 
         money_values = find_money_values(line)
@@ -821,19 +1058,40 @@ def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
             unit_price = money_values[-2]
             line_total = money_values[-1]
         elif len(money_values) == 1:
-            line_total = money_values[-1]
-            unit_price = round(line_total / qty, 4) if qty > 0 else None
+            unit_price = money_values[-1]
+            line_total = round(unit_price * qty, 2) if qty > 0 else None
 
-        item_name = clean_item_name_from_line(line)
+        if unit_price is not None and line_total is not None:
+            if line_total <= 1 and unit_price > 1 and qty > 0:
+                line_total = round(unit_price * qty, 2)
+
+            if line_total < unit_price and qty > 1:
+                line_total = round(unit_price * qty, 2)
+
+        item_name = clean_product_description(line)
 
         if not item_name:
             continue
+
+        if row_is_noise(item_name):
+            continue
+
+        unit = ""
+
+        if has_product_unit_signal(item_name):
+            m = re.search(
+                r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
+                item_name,
+                flags=re.I,
+            )
+            if m:
+                unit = normalize_unit(m.group(1))
 
         items.append({
             "item_raw": line,
             "item_name": item_name[:255],
             "qty": qty,
-            "unit": "",
+            "unit": unit or "pza",
             "unit_price": unit_price,
             "line_total": line_total,
             "ai_meta": {
