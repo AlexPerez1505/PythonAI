@@ -996,7 +996,6 @@ def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, A
 
     return items
 
-
 def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[str, Any]]:
     """
     Fallback especial para facturas EXEL cuando Azure desplaza columnas.
@@ -1031,21 +1030,21 @@ def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[s
 
         low_line = normalize_plain(line)
 
-        # Saltar solo encabezados. No usar row_is_noise(line) aquí,
-        # porque las filas válidas traen texto legal, impuesto y tasa.
-        if any(header in low_line for header in [
-            "clave productos y servicios",
-            "no identificacion",
-            "no. identificacion",
-            "cantidad",
-            "clave unidad",
-            "descripcion",
-            "valor unitario",
-            "importe del concepto",
-            "importe del impuesto",
-            "tipo factor",
-            "tasa",
-        ]):
+        # Saltar solamente la fila de encabezados real.
+        # NO saltar por "tasa" o "impuesto", porque las filas válidas también traen esas columnas.
+        is_header_row = (
+            "clave productos y servicios" in low_line
+            or "no identificacion" in low_line
+            or "no. identificacion" in low_line
+            or (
+                "cantidad" in low_line
+                and "clave unidad" in low_line
+                and "descripcion" in low_line
+                and "valor unitario" in low_line
+            )
+        )
+
+        if is_header_row:
             continue
 
         candidates = [
