@@ -205,7 +205,6 @@ LICITACION_SYSTEM_PROMPT = (
     "Responde UNICAMENTE JSON valido, sin markdown."
 )
 
-
 def _build_licitacion_prompt(raw_text: str) -> str:
     compact = (raw_text or "")[:60000]
     return f"""
@@ -240,7 +239,26 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON con esta estructura 
   ],
   "checklist_sugerido": [
     {{"item": "...", "checked": false}}
-  ]
+  ],
+  "citas": {{
+    "ficha.numero_licitacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "ficha.tipo_evento": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "ficha.organismo": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "ficha.objeto_licitacion": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "ficha.medio_participacion": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "fechas_clave.fecha_publicacion": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "fechas_clave.junta_aclaraciones": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "fechas_clave.presentacion_apertura": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "fechas_clave.fallo": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "fechas_clave.vigencia_contrato": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "resumen_ejecutivo.0": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "resumen_ejecutivo.1": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "resumen_ejecutivo.2": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "resumen_ejecutivo.3": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "resumen_ejecutivo.4": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "resumen_ejecutivo.5": {{"cita": "...", "fuente": "...", "pagina": 1}},
+    "resumen_ejecutivo.6": {{"cita": "...", "fuente": "...", "pagina": 1}}
+  }}
 }}
 
 Reglas:
@@ -249,6 +267,9 @@ Reglas:
 - Las fechas en formato dd/mm/aaaa cuando sea posible
 - En resumen_ejecutivo responde cada pregunta basandote SOLO en el texto
 - Las partidas son los items / productos / servicios solicitados
+- En "citas" pon el texto LITERAL del documento que respalda cada campo (max 350 caracteres)
+- El campo "fuente" debe ser el nombre EXACTO del archivo (los documentos vienen separados por "--- DOCUMENTO: nombre.pdf ---")
+- Si no hay cita disponible, omite ese campo de "citas" (no pongas null)
 
 Texto de la licitacion:
 {compact}
