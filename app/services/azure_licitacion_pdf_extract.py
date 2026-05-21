@@ -197,13 +197,13 @@ def extract_docx_text(file_path: str) -> str:
 
 # ════════════════════════════════════════════════════════════
 # OPENAI STRUCTURER (especifico para licitaciones)
-# Con soporte para primary + fallbacks
 # ════════════════════════════════════════════════════════════
 
 LICITACION_SYSTEM_PROMPT = (
     "Eres un asistente que extrae informacion de licitaciones publicas mexicanas. "
     "Responde UNICAMENTE JSON valido, sin markdown."
 )
+
 
 def _build_licitacion_prompt(raw_text: str) -> str:
     compact = (raw_text or "")[:60000]
@@ -238,7 +238,19 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON con esta estructura 
     {{"numero": 1, "descripcion": "...", "unidad": "...", "cantidad": 0}}
   ],
   "checklist_sugerido": [
-    {{"item": "...", "checked": false}}
+    {{
+      "requisito": "Nombre del requisito a presentar",
+      "descripcion": "Detalle de que debe contener el documento",
+      "formato": "No aplica",
+      "categoria": "Legal-Administrativo",
+      "aplicabilidad": "Unico",
+      "obligatorio": "Si",
+      "cumplimiento": "-",
+      "status": "Pendiente",
+      "prioridad": "Media",
+      "fuente": "INV.pdf",
+      "pagina": 1
+    }}
   ],
   "citas": {{
     "ficha.numero_licitacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
@@ -261,7 +273,7 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON con esta estructura 
   }}
 }}
 
-Reglas:
+Reglas generales:
 - Si un dato no se encuentra, usa exactamente "No se encontro informacion"
 - No inventes datos
 - Las fechas en formato dd/mm/aaaa cuando sea posible
@@ -271,21 +283,28 @@ Reglas:
 - El campo "fuente" debe ser el nombre EXACTO del archivo (los documentos vienen separados por "--- DOCUMENTO: nombre.pdf ---")
 - Si no hay cita disponible, omite ese campo de "citas" (no pongas null)
 
+Reglas del checklist:
+- Genera ENTRE 20 Y 50 requisitos detectados en el documento
+- Cubre todas las categorias: legales, administrativos, tecnicos, anexos requeridos, escritos bajo protesta, garantias, opiniones SAT/IMSS/INFONAVIT, fianzas, fichas tecnicas, etc.
+- "formato" usa uno de: "No aplica", "Anexo A", "Anexo B / Plataforma", "Anexo C", "Anexo D", "Formatos de la convocatoria"
+- "categoria" usa uno de: "Legal-Administrativo", "Tecnico", "Otro / Tecnico", "Otro"
+- "aplicabilidad" usa: "Unico" (un solo entregable) o "Por partida" (uno por cada partida)
+- "obligatorio" siempre "Si" (excepto opcionales claramente marcados)
+- "cumplimiento" siempre arranca en "-"
+- "status" siempre arranca en "Pendiente"
+- "prioridad": "Alta" (legal obligatorio), "Media" (tecnico comun), "Baja" (anexos secundarios)
+- "fuente" y "pagina" indican de que archivo y pagina se extrajo
+
 Texto de la licitacion:
 {compact}
 """.strip()
 
 
 def _get_openai_models() -> List[str]:
-    """
-    Devuelve [primario, ...fallbacks] segun .env
-    Soporta el patron nuevo (PRIMARY/FALLBACK) y cae al viejo (OPENAI_MODEL)
-    """
     primary = os.getenv("OPENAI_PRIMARY_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o"))
     fallback_raw = os.getenv("OPENAI_FALLBACK_MODELS", "")
     fallbacks = [m.strip() for m in fallback_raw.split(",") if m.strip()]
 
-    # mantener orden, sin duplicados
     seen = set()
     ordered = []
     for m in [primary] + fallbacks:
@@ -319,7 +338,6 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # Modelos de razonamiento (GPT-5, o1, o3) NO soportan temperature ni response_format
     is_reasoning = (
         model.startswith("gpt-5")
         or model.startswith("o1")
@@ -341,7 +359,6 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content or "{}"
 
-    # Limpiar markdown si vino con backticks (GPT-5 a veces los mete)
     clean = content.strip()
     if clean.startswith("```"):
         clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
@@ -350,7 +367,6 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
     try:
         return json.loads(clean)
     except json.JSONDecodeError:
-        # Intentar extraer el primer bloque {...} si vino con texto alrededor
         m = re.search(r"\{.*\}", clean, re.DOTALL)
         if m:
             try:
@@ -361,9 +377,6 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
 
 
 def structure_licitacion_with_openai(raw_text: str) -> Dict[str, Any]:
-    """
-    Intenta el modelo primario y cae a los fallbacks si falla por problema de modelo.
-    """
     models = _get_openai_models()
 
     if not models:
@@ -380,7 +393,6 @@ def structure_licitacion_with_openai(raw_text: str) -> Dict[str, Any]:
             _log(f"OpenAI fallo con modelo {model}: {msg}")
             last_error = e
 
-            # Si NO es error de modelo (es de red/auth/etc), no intentes mas
             if not _is_model_error(msg):
                 raise
 
