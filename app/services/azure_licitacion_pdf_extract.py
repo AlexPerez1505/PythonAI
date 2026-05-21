@@ -19,7 +19,6 @@ AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
 AZURE_API_VERSION = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION", "2024-11-30")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
 # ════════════════════════════════════════════════════════════
@@ -198,6 +197,7 @@ def extract_docx_text(file_path: str) -> str:
 
 # ════════════════════════════════════════════════════════════
 # OPENAI STRUCTURER (especifico para licitaciones)
+# Con soporte para primary + fallbacks
 # ════════════════════════════════════════════════════════════
 
 LICITACION_SYSTEM_PROMPT = (
@@ -255,7 +255,39 @@ Texto de la licitacion:
 """.strip()
 
 
-def structure_licitacion_with_openai(raw_text: str) -> Dict[str, Any]:
+def _get_openai_models() -> List[str]:
+    """
+    Devuelve [primario, ...fallbacks] segun .env
+    Soporta el patron nuevo (PRIMARY/FALLBACK) y cae al viejo (OPENAI_MODEL)
+    """
+    primary = os.getenv("OPENAI_PRIMARY_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o"))
+    fallback_raw = os.getenv("OPENAI_FALLBACK_MODELS", "")
+    fallbacks = [m.strip() for m in fallback_raw.split(",") if m.strip()]
+
+    # mantener orden, sin duplicados
+    seen = set()
+    ordered = []
+    for m in [primary] + fallbacks:
+        if m and m not in seen:
+            seen.add(m)
+            ordered.append(m)
+
+    return ordered
+
+
+def _is_model_error(msg: str) -> bool:
+    msg = (msg or "").lower()
+    return any(s in msg for s in [
+        "model_not_found",
+        "does not have access",
+        "invalid_request_error",
+        "not supported",
+        "unsupported",
+        "model `",
+    ])
+
+
+def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
     if not OPENAI_API_KEY:
         raise Exception("Falta OPENAI_API_KEY en .env")
 
@@ -266,22 +298,72 @@ def structure_licitacion_with_openai(raw_text: str) -> Dict[str, Any]:
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
+    # Modelos de razonamiento (GPT-5, o1, o3) NO soportan temperature ni response_format
+    is_reasoning = (
+        model.startswith("gpt-5")
+        or model.startswith("o1")
+        or model.startswith("o3")
+    )
+
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": LICITACION_SYSTEM_PROMPT},
             {"role": "user", "content": _build_licitacion_prompt(raw_text)},
         ],
-        temperature=0.1,
-        response_format={"type": "json_object"},
-    )
+    }
 
+    if not is_reasoning:
+        kwargs["temperature"] = 0.1
+        kwargs["response_format"] = {"type": "json_object"}
+
+    response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content or "{}"
 
+    # Limpiar markdown si vino con backticks (GPT-5 a veces los mete)
+    clean = content.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
+        clean = re.sub(r"\s*```$", "", clean)
+
     try:
-        return json.loads(content)
-    except json.JSONDecodeError as e:
-        raise Exception(f"OpenAI devolvio JSON invalido: {e}")
+        return json.loads(clean)
+    except json.JSONDecodeError:
+        # Intentar extraer el primer bloque {...} si vino con texto alrededor
+        m = re.search(r"\{.*\}", clean, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+        raise Exception(f"Modelo {model} devolvio JSON invalido: {content[:300]}")
+
+
+def structure_licitacion_with_openai(raw_text: str) -> Dict[str, Any]:
+    """
+    Intenta el modelo primario y cae a los fallbacks si falla por problema de modelo.
+    """
+    models = _get_openai_models()
+
+    if not models:
+        raise Exception("No hay modelos OpenAI configurados (OPENAI_PRIMARY_MODEL o OPENAI_MODEL)")
+
+    last_error: Optional[Exception] = None
+
+    for model in models:
+        try:
+            _log(f"OpenAI: probando modelo {model}")
+            return _call_openai_once(model, raw_text)
+        except Exception as e:
+            msg = str(e)
+            _log(f"OpenAI fallo con modelo {model}: {msg}")
+            last_error = e
+
+            # Si NO es error de modelo (es de red/auth/etc), no intentes mas
+            if not _is_model_error(msg):
+                raise
+
+    raise last_error or Exception("Todos los modelos OpenAI fallaron")
 
 
 # ════════════════════════════════════════════════════════════
