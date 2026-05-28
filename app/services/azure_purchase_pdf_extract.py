@@ -702,6 +702,8 @@ def looks_like_real_product_description(text: str) -> bool:
         return True
 
     return False
+
+
 def clean_product_description(text: str) -> str:
     clean = normalize_spaces(text)
 
@@ -1508,6 +1510,252 @@ def convert_azure_result_to_purchase_json(azure_result: Dict[str, Any], category
     }
 
 
+# ---------------------------------------------------------------------------
+# Capa OpenAI: estructura la salida cruda de Azure en items limpios
+# ---------------------------------------------------------------------------
+
+def _flatten_azure_tables(tables: List[Dict[str, Any]]) -> str:
+    """Convierte las tablas detectadas por Azure a texto plano para mandárselo a OpenAI."""
+    out = []
+
+    for ti, table in enumerate(tables, start=1):
+        matrix = table_to_matrix(table)
+
+        if not matrix:
+            continue
+
+        rows = []
+        for row in matrix:
+            cells = [normalize_spaces(c) for c in row]
+            rows.append(" | ".join(cells))
+
+        out.append(f"--- TABLA {ti} ({len(matrix)} filas) ---\n" + "\n".join(rows))
+
+    return "\n\n".join(out)
+
+
+def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Optional[Dict[str, Any]]:
+    """Usa OpenAI para estructurar la salida cruda de Azure en items limpios.
+
+    Devuelve None si OpenAI no está disponible o falla, para que el caller
+    pueda caer al parser Azure-only.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        _log("openai package no instalado, se omite estructurado con OpenAI")
+        return None
+
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    if not api_key:
+        _log("OPENAI_API_KEY no configurada, se usa solo Azure")
+        return None
+
+    analyze_result = azure_result.get("analyzeResult", {})
+    content = (analyze_result.get("content", "") or "")[:35000]
+    tables = analyze_result.get("tables", []) or []
+    tables_text = _flatten_azure_tables(tables)[:35000]
+
+    party_hint = (
+        "El cliente / receptor es la empresa que paga (NO el emisor)."
+        if category == "venta"
+        else "El proveedor / emisor es quien factura."
+    )
+
+    prompt = f"""Eres un extractor experto de facturas mexicanas (CFDI 4.0, tickets, remisiones).
+
+Categoría: {category}
+{party_hint}
+
+Te paso el TEXTO CRUDO y las TABLAS DETECTADAS por Azure Document Intelligence sobre un documento.
+Devuelve SOLO los renglones REALES de la TABLA DE CONCEPTOS. NO inventes filas.
+
+REGLAS ESTRICTAS:
+- Ignora pies de página, totales, IVA, traslados, retenciones, sellos, cantidades en letra, RFC sueltos.
+- Si una celda de descripción incluye basura del pie (claves SAT pegadas, "Traslado Base", "Importe con", cantidad en letra tipo "NUEVE MIL QUINIENTOS OCHENTA Y SIETE PESOS"), RECÓRTALA: solo deja la descripción real del producto.
+- qty * unit_price DEBE coincidir con line_total (tolerancia ±2%). Si no coincide, ajusta unit_price para que cuadre con line_total.
+- Si la factura tiene 1 sola línea de producto, devuelve UN solo item. NO inventes filas adicionales.
+- Si Azure pegó código de barras o clave del SAT en la descripción, EXCLÚYELOS de item_name.
+- Conserva acentos, mayúsculas y minúsculas naturales del producto.
+- document_datetime en formato "YYYY-MM-DD HH:MM:SS". Si solo hay fecha, usa "YYYY-MM-DD 00:00:00".
+- Si no estás seguro de un valor de item, usa null (NO 0). En subtotal/tax/total del document, si no se ve usa 0.
+
+FORMATO JSON ESTRICTO (responde SOLO esto, sin markdown):
+{{
+  "document": {{
+    "document_type": "factura|ticket|remision|otro",
+    "supplier_name": null,
+    "counterparty_rfc": null,
+    "uuid": null,
+    "serie": null,
+    "folio": null,
+    "currency": "MXN",
+    "document_datetime": "YYYY-MM-DD HH:MM:SS",
+    "subtotal": 0,
+    "tax": 0,
+    "total": 0
+  }},
+  "items": [
+    {{
+      "item_name": "descripción limpia del producto/servicio",
+      "qty": 0,
+      "unit": "PIEZA",
+      "unit_price": 0,
+      "line_total": 0,
+      "prodserv_code": null
+    }}
+  ]
+}}
+
+=== TEXTO CRUDO DEL DOCUMENTO ===
+{content}
+
+=== TABLAS DETECTADAS POR AZURE ===
+{tables_text or "(Azure no detectó tablas estructuradas)"}
+"""
+
+    try:
+        client = OpenAI(api_key=api_key)
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Responde únicamente JSON válido. No uses markdown ni bloques ```."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+
+        raw = response.choices[0].message.content or "{}"
+        return json.loads(raw)
+
+    except Exception as e:
+        _log(f"OpenAI structuring failed: {e}")
+        return None
+
+
+def convert_openai_result_to_purchase_json(
+    openai_result: Dict[str, Any],
+    azure_result: Dict[str, Any],
+    category: str,
+) -> Dict[str, Any]:
+    """Adapta el JSON de OpenAI al formato que espera PHP (PublicationPurchaseAiService)."""
+    doc_in = openai_result.get("document", {}) or {}
+    items_in = openai_result.get("items", []) or []
+
+    items_out = []
+
+    for it in items_in:
+        if not isinstance(it, dict):
+            continue
+
+        name = normalize_spaces(it.get("item_name") or "")
+        if not name or len(name) < 3:
+            continue
+
+        qty_raw = it.get("qty")
+        try:
+            qty = float(qty_raw) if qty_raw is not None else 1.0
+            if qty <= 0:
+                qty = 1.0
+        except (TypeError, ValueError):
+            qty = 1.0
+
+        unit_price_raw = it.get("unit_price")
+        line_total_raw = it.get("line_total")
+
+        try:
+            unit_price = float(unit_price_raw) if unit_price_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            unit_price = None
+
+        try:
+            line_total = float(line_total_raw) if line_total_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            line_total = None
+
+        if line_total is None and unit_price is not None and qty > 0:
+            line_total = round(unit_price * qty, 2)
+
+        if unit_price is None and line_total is not None and qty > 0:
+            unit_price = round(line_total / qty, 4)
+
+        unit = normalize_unit(it.get("unit") or "pza") or "pza"
+
+        items_out.append({
+            "item_raw": name,
+            "item_name": name[:255],
+            "qty": round(qty, 3),
+            "unit": unit,
+            "unit_price": unit_price,
+            "line_total": line_total,
+            "ai_meta": {
+                "prodserv": it.get("prodserv_code"),
+                "source": "azure_document_intelligence_openai",
+                "has_amounts": bool(line_total and line_total > 0),
+            },
+        })
+
+    rfc_raw = doc_in.get("counterparty_rfc")
+    uuid_raw = doc_in.get("uuid")
+
+    document = {
+        "document_type": doc_in.get("document_type") or "factura",
+        "supplier_name": doc_in.get("supplier_name"),
+        "counterparty_rfc": rfc_raw.upper() if isinstance(rfc_raw, str) and rfc_raw.strip() else None,
+        "uuid": uuid_raw.upper() if isinstance(uuid_raw, str) and uuid_raw.strip() else None,
+        "serie": doc_in.get("serie"),
+        "folio": doc_in.get("folio"),
+        "currency": doc_in.get("currency") or "MXN",
+        "document_datetime": doc_in.get("document_datetime"),
+        "subtotal": float(doc_in.get("subtotal") or 0),
+        "tax": float(doc_in.get("tax") or 0),
+        "total": float(doc_in.get("total") or 0),
+    }
+
+    items_with_amounts = [
+        i for i in items_out
+        if i.get("line_total") and float(i["line_total"]) > 0
+    ]
+
+    if document["subtotal"] <= 0 and items_with_amounts:
+        document["subtotal"] = round(
+            sum(float(i["line_total"]) for i in items_with_amounts), 2
+        )
+
+    if document["tax"] <= 0 and document["subtotal"] > 0:
+        document["tax"] = round(document["subtotal"] * 0.16, 2)
+
+    if document["total"] <= 0 and document["subtotal"] > 0:
+        document["total"] = round(document["subtotal"] + document["tax"], 2)
+
+    analyze_result = azure_result.get("analyzeResult", {})
+    pages = analyze_result.get("pages", []) or []
+    tables = analyze_result.get("tables", []) or []
+
+    warnings = []
+    if not items_out:
+        warnings.append("OpenAI no detectó conceptos a partir de la lectura de Azure.")
+
+    return {
+        "document": document,
+        "items": items_out,
+        "notes": {
+            "warnings": warnings,
+            "confidence": 0.92 if items_out else 0.40,
+            "engine": "azure_document_intelligence + openai",
+            "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            "pages": len(pages),
+            "tables": len(tables),
+            "items_count": len(items_out),
+            "items_with_amounts": len(items_with_amounts),
+        },
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -1515,7 +1763,8 @@ def main():
     parser.add_argument("--category", default="compra")
     parser.add_argument("--model", default="prebuilt-layout")
     parser.add_argument("--pages-per-chunk", type=int, default=5)
-    parser.add_argument("--raw", action="store_true")
+    parser.add_argument("--raw", action="store_true", help="Devuelve respuesta cruda de Azure (debug)")
+    parser.add_argument("--no-openai", action="store_true", help="Omite estructurado con OpenAI")
 
     args = parser.parse_args()
 
@@ -1534,6 +1783,20 @@ def main():
     if args.raw:
         print(json.dumps(azure_result, ensure_ascii=False))
         return
+
+    if not args.no_openai:
+        openai_result = structure_with_openai(azure_result, args.category)
+
+        if openai_result and openai_result.get("items"):
+            final = convert_openai_result_to_purchase_json(
+                openai_result=openai_result,
+                azure_result=azure_result,
+                category=args.category,
+            )
+            print(json.dumps(final, ensure_ascii=False))
+            return
+
+        _log("OpenAI no devolvió items útiles. Se cae al parser Azure-only.")
 
     normalized = convert_azure_result_to_purchase_json(
         azure_result=azure_result,
