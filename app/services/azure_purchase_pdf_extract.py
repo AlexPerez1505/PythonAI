@@ -251,6 +251,16 @@ def _flatten_azure_tables(tables: List[Dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Default del modelo si NO se pasa OPENAI_MODEL.
+# Lo dejamos en gpt-4o porque sabemos que es el que sí está habilitado en el
+# proyecto OpenAI actual. Si en el futuro habilitas gpt-4o-mini en tu proyecto
+# de OpenAI (https://platform.openai.com/settings/organization/projects),
+# pasa OPENAI_MODEL=gpt-4o-mini desde el .env y ya.
+# ---------------------------------------------------------------------------
+DEFAULT_OPENAI_MODEL = "gpt-4o"
+
+
+# ---------------------------------------------------------------------------
 # OpenAI: la IA hace TODO el trabajo de identificar productos vs basura
 # ---------------------------------------------------------------------------
 
@@ -306,11 +316,19 @@ def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Dict[s
     """Manda lo que Azure extrajo a OpenAI y deja que la IA decida qué es producto."""
     try:
         from openai import OpenAI
+        import openai as openai_pkg
     except ImportError:
         raise Exception("El paquete 'openai' no está instalado. Ejecuta: pip3 install --user openai")
 
     api_key = os.getenv("OPENAI_API_KEY", "")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+
+    # ── DEBUG: imprime qué recibió el script (no expone la key completa) ──
+    _log(f"[DEBUG] openai package version: {getattr(openai_pkg, '__version__', 'unknown')}")
+    _log(f"[DEBUG] OPENAI_API_KEY recibida (primeros 10 chars): {api_key[:10] if api_key else '(VACIA)'}")
+    _log(f"[DEBUG] OPENAI_MODEL recibido: {model!r}")
+    _log(f"[DEBUG] Python: {sys.version.split()[0]}")
+    # ────────────────────────────────────────────────────────────────────
 
     if not api_key:
         raise Exception("Falta OPENAI_API_KEY en el entorno.")
@@ -337,15 +355,24 @@ def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Dict[s
 
     client = OpenAI(api_key=api_key)
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": OPENAI_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        response_format={"type": "json_object"},
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": OPENAI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        # Captura el detalle completo del error de OpenAI
+        body = getattr(e, "body", None)
+        _log(f"[DEBUG] OpenAI exception type: {type(e).__name__}")
+        _log(f"[DEBUG] OpenAI exception str: {e}")
+        if body is not None:
+            _log(f"[DEBUG] OpenAI exception body: {body}")
+        raise
 
     raw = response.choices[0].message.content or "{}"
     return json.loads(raw)
@@ -461,7 +488,7 @@ def convert_openai_result_to_purchase_json(
             "warnings": warnings,
             "confidence": 0.92 if items_out else 0.40,
             "engine": "azure_document_intelligence + openai",
-            "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            "openai_model": os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
             "pages": len(pages),
             "tables": len(tables),
             "items_count": len(items_out),
