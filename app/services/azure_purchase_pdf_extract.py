@@ -251,13 +251,31 @@ def _flatten_azure_tables(tables: List[Dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Default del modelo si NO se pasa OPENAI_MODEL.
-# Lo dejamos en gpt-4o porque sabemos que es el que sí está habilitado en el
-# proyecto OpenAI actual. Si en el futuro habilitas gpt-4o-mini en tu proyecto
-# de OpenAI (https://platform.openai.com/settings/organization/projects),
-# pasa OPENAI_MODEL=gpt-4o-mini desde el .env y ya.
+# Defaults
 # ---------------------------------------------------------------------------
 DEFAULT_OPENAI_MODEL = "gpt-4o"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+
+def _resolve_openai_base_url() -> str:
+    """
+    Resuelve la URL base que va a usar el cliente de OpenAI.
+
+    Si OPENAI_BASE_URL viene seteada (a veces se hereda de PHP-FPM con un valor
+    que NO termina en /v1, como 'https://api.openai.com'), la corregimos para que
+    SIEMPRE termine en /v1. Si no viene, usamos el default oficial.
+    """
+    base = os.getenv("OPENAI_BASE_URL", "").strip()
+
+    if not base:
+        return DEFAULT_OPENAI_BASE_URL
+
+    base = base.rstrip("/")
+
+    if not base.endswith("/v1"):
+        base = base + "/v1"
+
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -322,13 +340,16 @@ def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Dict[s
 
     api_key = os.getenv("OPENAI_API_KEY", "")
     model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+    base_url = _resolve_openai_base_url()
 
-    # ── DEBUG: imprime qué recibió el script (no expone la key completa) ──
+    # ── DEBUG ──
     _log(f"[DEBUG] openai package version: {getattr(openai_pkg, '__version__', 'unknown')}")
     _log(f"[DEBUG] OPENAI_API_KEY recibida (primeros 10 chars): {api_key[:10] if api_key else '(VACIA)'}")
     _log(f"[DEBUG] OPENAI_MODEL recibido: {model!r}")
+    _log(f"[DEBUG] OPENAI_BASE_URL final usado: {base_url!r}")
+    _log(f"[DEBUG] OPENAI_BASE_URL crudo del entorno: {os.getenv('OPENAI_BASE_URL', '(no set)')!r}")
     _log(f"[DEBUG] Python: {sys.version.split()[0]}")
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────
 
     if not api_key:
         raise Exception("Falta OPENAI_API_KEY en el entorno.")
@@ -353,7 +374,8 @@ def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Dict[s
 {tables_text or "(Azure no detectó tablas estructuradas)"}
 """
 
-    client = OpenAI(api_key=api_key)
+    # Forzamos base_url para que NUNCA herede un valor mal formado de PHP-FPM
+    client = OpenAI(api_key=api_key, base_url=base_url)
 
     try:
         response = client.chat.completions.create(
@@ -366,7 +388,6 @@ def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Dict[s
             response_format={"type": "json_object"},
         )
     except Exception as e:
-        # Captura el detalle completo del error de OpenAI
         body = getattr(e, "body", None)
         _log(f"[DEBUG] OpenAI exception type: {type(e).__name__}")
         _log(f"[DEBUG] OpenAI exception str: {e}")
