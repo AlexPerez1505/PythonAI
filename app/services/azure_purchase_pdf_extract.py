@@ -22,9 +22,12 @@ def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Azure Document Intelligence
+# ---------------------------------------------------------------------------
+
 def _is_size_error(message: str) -> bool:
     text = (message or "").lower()
-
     return (
         "invalidcontentlength" in text
         or "too large" in text
@@ -48,18 +51,12 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         "Content-Type": "application/pdf",
     }
 
-    response = requests.post(
-        url,
-        headers=headers,
-        data=file_bytes,
-        timeout=180,
-    )
+    response = requests.post(url, headers=headers, data=file_bytes, timeout=180)
 
     if not response.ok:
         raise Exception(f"Error iniciando Azure analysis: {response.status_code} - {response.text}")
 
     operation_location = response.headers.get("operation-location")
-
     if not operation_location:
         raise Exception("Azure no devolvió operation-location")
 
@@ -91,18 +88,13 @@ def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> List[bytes]:
     total_pages = len(reader.pages)
 
     chunks = []
-
     for start in range(0, total_pages, pages_per_chunk):
         end = min(start + pages_per_chunk, total_pages)
-
         writer = PdfWriter()
-
         for i in range(start, end):
             writer.add_page(reader.pages[i])
-
         output = BytesIO()
         writer.write(output)
-
         chunks.append(output.getvalue())
 
     return chunks
@@ -125,10 +117,8 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         for page in pages:
             page_copy = dict(page)
-
             if "pageNumber" in page_copy:
                 page_copy["pageNumber"] = current_page_offset + int(page_copy["pageNumber"])
-
             merged_pages.append(page_copy)
 
         for table in tables:
@@ -136,35 +126,24 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
 
             if "boundingRegions" in table_copy:
                 new_regions = []
-
                 for region in table_copy.get("boundingRegions", []) or []:
                     region_copy = dict(region)
-
                     if "pageNumber" in region_copy:
                         region_copy["pageNumber"] = current_page_offset + int(region_copy["pageNumber"])
-
                     new_regions.append(region_copy)
-
                 table_copy["boundingRegions"] = new_regions
 
             new_cells = []
-
             for cell in table_copy.get("cells", []) or []:
                 cell_copy = dict(cell)
-
                 if "boundingRegions" in cell_copy:
                     cell_regions = []
-
                     for region in cell_copy.get("boundingRegions", []) or []:
                         region_copy = dict(region)
-
                         if "pageNumber" in region_copy:
                             region_copy["pageNumber"] = current_page_offset + int(region_copy["pageNumber"])
-
                         cell_regions.append(region_copy)
-
                     cell_copy["boundingRegions"] = cell_regions
-
                 new_cells.append(cell_copy)
 
             table_copy["cells"] = new_cells
@@ -188,19 +167,18 @@ def analyze_pdf_with_auto_split(
     pages_per_chunk: int = 5,
 ) -> Dict[str, Any]:
     try:
-        _log("Intentando analizar PDF completo...")
+        _log("Analizando PDF con Azure Document Intelligence...")
         return _analyze_single_pdf_bytes(file_bytes, model=model)
 
     except Exception as e:
         if not _is_size_error(str(e)):
             raise
-
         _log("Azure rechazó el PDF completo por tamaño. Se intentará dividir.")
 
     current_chunk_size = pages_per_chunk
 
     while current_chunk_size >= 1:
-        _log(f"Intentando dividir PDF en bloques de {current_chunk_size} página(s)...")
+        _log(f"Dividiendo PDF en bloques de {current_chunk_size} página(s)...")
 
         chunks = split_pdf_bytes(file_bytes, pages_per_chunk=current_chunk_size)
         partial_results = []
@@ -210,13 +188,10 @@ def analyze_pdf_with_auto_split(
             try:
                 _log(f"Procesando chunk {index}/{len(chunks)}...")
                 partial_results.append(_analyze_single_pdf_bytes(chunk_bytes, model=model))
-
             except Exception as e:
                 if _is_size_error(str(e)) and current_chunk_size > 1:
-                    _log(f"Chunk {index} todavía muy grande. Reduciendo tamaño.")
                     failed_due_to_size = True
                     break
-
                 raise
 
         if not failed_due_to_size:
@@ -227,606 +202,12 @@ def analyze_pdf_with_auto_split(
     raise Exception("No se pudo procesar el PDF incluso dividiéndolo en páginas individuales.")
 
 
-def normalize_spaces(text: str) -> str:
+# ---------------------------------------------------------------------------
+# Helpers mínimos compartidos
+# ---------------------------------------------------------------------------
+
+def normalize_spaces(text) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
-
-
-def normalize_plain(text: str) -> str:
-    text = normalize_spaces(text).lower()
-    return text.translate(str.maketrans("áéíóúüñ", "aeiouun"))
-
-
-def money_to_float(value: Optional[str]) -> Optional[float]:
-    if value is None:
-        return None
-
-    text = str(value).strip()
-
-    if not text:
-        return None
-
-    text = re.sub(r"[^0-9,.\-]", "", text)
-
-    if not text:
-        return None
-
-    if "," in text and "." in text:
-        text = text.replace(",", "")
-    elif "," in text and "." not in text:
-        text = text.replace(",", ".")
-
-    try:
-        return round(float(text), 4)
-    except Exception:
-        return None
-
-
-def extract_amount_loose(value: str, prefer_last: bool = True) -> Optional[float]:
-    text = normalize_spaces(value)
-
-    if not text:
-        return None
-
-    candidates = re.findall(
-        r"(?:\$?\s*)([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2,4})|[0-9]+(?:\.[0-9]{2,4}))",
-        text,
-    )
-
-    if not candidates:
-        return None
-
-    parsed = []
-
-    for candidate in candidates:
-        value_float = money_to_float(candidate)
-
-        if value_float is not None:
-            parsed.append(value_float)
-
-    if not parsed:
-        return None
-
-    return parsed[-1] if prefer_last else parsed[0]
-
-
-def looks_like_money_cell(value: str) -> bool:
-    text = normalize_spaces(value)
-
-    if not text:
-        return False
-
-    if "/" in text or '"' in text or "°" in text:
-        return False
-
-    if "$" in text:
-        return True
-
-    if re.fullmatch(r"[0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})", text):
-        return True
-
-    if re.fullmatch(r"[0-9]+(?:\.[0-9]{2,4})", text):
-        return True
-
-    return False
-
-
-def extract_money_from_cell(value: str) -> Optional[float]:
-    if not looks_like_money_cell(value):
-        return None
-
-    return money_to_float(value)
-
-
-def find_money_values(text: str) -> List[float]:
-    if not text:
-        return []
-
-    values = []
-    parts = re.split(r"\s*\|\s*|\t+", text)
-
-    for part in parts:
-        amount = extract_money_from_cell(part)
-
-        if amount is not None:
-            values.append(amount)
-
-    if not values:
-        matches = re.findall(
-            r"\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2,4})|[0-9]+(?:\.[0-9]{2,4}))",
-            text,
-            flags=re.I,
-        )
-
-        for match in matches:
-            value = money_to_float(match)
-
-            if value is not None:
-                values.append(value)
-
-    return values
-
-
-def parse_number(value: str) -> Optional[float]:
-    text = normalize_spaces(value)
-
-    if not text:
-        return None
-
-    if re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", text):
-        return None
-
-    if "/" in text or '"' in text or "°" in text:
-        return None
-
-    text = text.replace(",", "")
-
-    if not re.fullmatch(r"-?[0-9]+(?:\.[0-9]+)?", text):
-        return None
-
-    try:
-        return float(text)
-    except Exception:
-        return None
-
-
-def parse_qty(value: str) -> Optional[float]:
-    number = parse_number(value)
-
-    if number is None:
-        return None
-
-    if number <= 0:
-        return None
-
-    return round(number, 3)
-
-
-def find_qty_values(text: str) -> Optional[float]:
-    clean = normalize_spaces(text)
-
-    qty_match = re.search(
-        r"(?:cantidad|cant\.?|qty)\s*:?\s*([0-9]+(?:[.,][0-9]+)?)",
-        clean,
-        flags=re.I,
-    )
-
-    if qty_match:
-        value = qty_match.group(1).replace(",", ".")
-
-        try:
-            qty = float(value)
-            return qty if qty > 0 else None
-        except Exception:
-            return None
-
-    first_number = re.match(r"^\s*([0-9]+(?:[.,][0-9]+)?)\s+", clean)
-
-    if first_number:
-        value = first_number.group(1).replace(",", ".")
-
-        try:
-            qty = float(value)
-
-            if 0 < qty <= 999999:
-                return qty
-
-        except Exception:
-            return None
-
-    return None
-
-
-def normalize_unit(value: str) -> str:
-    text = normalize_spaces(value).upper().replace(".", "")
-
-    aliases = {
-        "PZA": "PIEZA",
-        "PZ": "PIEZA",
-        "UNIDAD": "PIEZA",
-        "UNIDADES": "PIEZA",
-        "H87": "PIEZA",
-        "CAJAS": "CAJA",
-        "PAQUETES": "PAQUETE",
-        "PQT": "PAQUETE",
-        "PQTE": "PAQUETE",
-        "XPK": "PAQUETE",
-        "KILO": "KG",
-        "KILOS": "KG",
-        "GRAMOS": "GR",
-        "LITROS": "LT",
-        "SERVICIOS": "SERVICIO",
-        "METRO": "M",
-        "METROS": "M",
-        "ROLLOS": "ROLLO",
-        "BOLSAS": "BOLSA",
-        "CUBETAS": "CUBETA",
-        "JUEGOS": "JUEGO",
-        "JGO": "JUEGO",
-        "LOTES": "LOTE",
-        "PARES": "PAR",
-    }
-
-    return aliases.get(text, text)
-
-
-def looks_like_unit(value: str) -> bool:
-    text = normalize_unit(value)
-
-    return text in {
-        "PIEZA",
-        "CAJA",
-        "PAQUETE",
-        "KG",
-        "GR",
-        "LT",
-        "SERVICIO",
-        "M",
-        "ROLLO",
-        "BOLSA",
-        "CUBETA",
-        "JUEGO",
-        "LOTE",
-        "PAR",
-        "POTE",
-        "BOTE",
-    }
-
-
-def row_is_noise(line: str) -> bool:
-    low = normalize_plain(line)
-
-    if not low or len(low) < 4:
-        return True
-
-    noise_phrases = [
-        "subtotal",
-        "sub total",
-        "total documento",
-        "forma de pago",
-        "metodo de pago",
-        "sello",
-        "cadena original",
-        "uuid",
-        "certificado",
-        "emisor",
-        "receptor",
-        "regimen fiscal",
-        "lugar expedicion",
-        "tipo de cambio",
-        "moneda",
-        "uso cfdi",
-        "folio fiscal",
-        "no certificado",
-        "certificado sat",
-        "fecha timbrado",
-        "fecha de timbrado",
-        "rfc",
-        "orden de venta",
-        "orden venta",
-        "cliente",
-        "proveedor",
-        "domicilio",
-        "codigo postal",
-        "expedido en",
-        "serie",
-        "folio",
-        "factura",
-        "depositario",
-        "detallados en esta factura",
-        "el dominio de expedicion",
-        "exel del norte",
-        "gel exel del norte",
-        "fecha",
-        "hora",
-        "condiciones de pago",
-        "cuenta de pago",
-        "banco",
-        "observaciones",
-        "comentarios",
-        "pago en una sola exhibicion",
-        "clave productos y servicios",
-        "clave producto",
-        "clave prod",
-        "no identificacion",
-        "no. identificacion",
-        "cantidad",
-        "clave unidad",
-        "descripcion",
-        "valor unitario",
-        "precio unitario",
-        "importe del concepto",
-        "descuento",
-        "importe del impuesto",
-        "tipo factor",
-        "num prog",
-        "cant min",
-        "cant max",
-        "unidad de medida",
-        "descripcion del bien",
-        "eventos | fecha",
-        "fecha y hora",
-        "junta de aclaraciones",
-        "acto de apertura",
-        "emision de fallo",
-        "recepcion de dudas",
-        "proposicion tecnica",
-        "proposicion economica",
-        "acreditacion de la personalidad",
-        "declaracion de integridad",
-        "bajo protesta de decir verdad",
-        "estratificacion como micro",
-        "tratado de libre comercio",
-        "contratacion publica",
-    ]
-
-    if any(phrase in low for phrase in noise_phrases):
-        return True
-
-    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}t?[0-9:.\sampm\.]*", low):
-        return True
-
-    if re.fullmatch(r"[a-z&]{3,4}[0-9]{6}[a-z0-9]{3}", low, flags=re.I):
-        return True
-
-    if re.match(r"^anexo\s+[a-z0-9]+\s*\|", low, flags=re.I):
-        return True
-
-    admin_words = [
-        "expedicion",
-        "receptor",
-        "emisor",
-        "fiscal",
-        "factura",
-        "certificado",
-        "timbre",
-        "sat",
-        "cfdi",
-    ]
-
-    if any(word in low for word in admin_words):
-        return True
-
-    return False
-
-
-def has_product_unit_signal(text: str) -> bool:
-    low = normalize_plain(text)
-
-    product_units = [
-        "pza",
-        "pieza",
-        "pz",
-        "pqte",
-        "pqt",
-        "paquete",
-        "pote",
-        "caja",
-        "cja",
-        "bolsa",
-        "bote",
-        "rollo",
-        "lt",
-        "litro",
-        "kg",
-        "kilo",
-        "servicio",
-        "jgo",
-        "juego",
-        "par",
-    ]
-
-    return any(re.search(rf"\b{re.escape(unit)}\b", low) for unit in product_units)
-
-
-def looks_like_real_product_description(text: str) -> bool:
-    clean = normalize_spaces(text)
-    low = normalize_plain(clean)
-
-    if len(clean) < 5:
-        return False
-
-    if row_is_noise(clean):
-        return False
-
-    if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", clean):
-        return False
-
-    product_words = [
-        "boligrafo",
-        "engrapadora",
-        "folder",
-        "guillotina",
-        "lapiz",
-        "marcador",
-        "papel",
-        "pza",
-        "pieza",
-        "pqte",
-        "pqt",
-        "paquete",
-        "pote",
-        "caja",
-        "cinta",
-        "clip",
-        "grapa",
-        "libreta",
-        "sobre",
-        "protector",
-        "calculadora",
-        "corrector",
-        "pegamento",
-        "mica",
-        "cartulina",
-        "tijera",
-        "borrador",
-        "perforadora",
-        "sacapuntas",
-        "pintarron",
-        "servilleta",
-        "block",
-        "broche",
-        "charola",
-        "cutter",
-        "dedal",
-        "desengrapadora",
-        "cera",
-        "cubierta",
-        "hojas",
-        "goma",
-        "ligas",
-        "pines",
-        "tachuelas",
-        "organizador",
-        "regla",
-        "separadores",
-        "tarjeta",
-        "pelicula",
-        "cargo envio",
-        "estafeta",
-        "janel",
-        "nextep",
-        "revistero",
-        "malla",
-        "detector",
-        "billetes",
-        "adhesivo",
-        "ceblofan",
-        "celofan",
-        "trans janel",
-    ]
-
-    if any(word in low for word in product_words):
-        return True
-
-    if has_product_unit_signal(clean):
-        return True
-
-    return False
-
-
-def clean_product_description(text: str) -> str:
-    clean = normalize_spaces(text)
-
-    clean = re.sub(r"^\s*[0-9]+\s*\|\s*", "", clean)
-    clean = re.sub(r"^\s*[0-9]+\s+", "", clean)
-
-    # Si Azure pegó códigos antes de la unidad real del producto,
-    # recorta desde la primera unidad válida.
-    unit_start = re.search(
-        r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b\s*,?",
-        clean,
-        flags=re.I,
-    )
-
-    if unit_start:
-        clean = clean[unit_start.start():]
-
-    clean = re.sub(
-        r"\b(?:concepto|descripción|descripcion|cantidad|precio|importe|total|unidad)\b",
-        " ",
-        clean,
-        flags=re.I,
-    )
-
-    clean = normalize_spaces(clean)
-    return clean[:255]
-
-
-def choose_description_from_values(values: List[str]) -> str:
-    candidates = []
-
-    for value in values:
-        text = normalize_spaces(value)
-
-        if not text:
-            continue
-
-        if row_is_noise(text):
-            continue
-
-        if looks_like_unit(text):
-            continue
-
-        if looks_like_real_product_description(text):
-            candidates.append(text)
-
-    if not candidates:
-        return ""
-
-    selected = max(candidates, key=len)
-
-    return clean_product_description(selected)
-
-
-def choose_unit_from_values(values: List[str]) -> str:
-    for value in values:
-        if looks_like_unit(value):
-            return normalize_unit(value)
-
-    return ""
-
-
-def normalize_header_cell(text: str) -> str:
-    text = normalize_plain(text)
-    text = text.replace(".", "")
-    return text
-
-
-def detect_header_map(matrix: List[List[str]]) -> Dict[str, Any]:
-    best = {
-        "row": None,
-        "desc": None,
-        "qty": None,
-        "unit": None,
-        "unit_price": None,
-        "line_total": None,
-        "tax_amount": None,
-    }
-
-    for row_idx, row in enumerate(matrix[:10]):
-        score = 0
-        current = dict(best)
-        current["row"] = row_idx
-
-        for col_idx, raw in enumerate(row):
-            cell = normalize_header_cell(raw)
-
-            if not cell:
-                continue
-
-            if "descripcion" in cell or "concepto" in cell:
-                current["desc"] = col_idx
-                score += 4
-
-            if "cantidad" in cell or cell in {"cant", "qty"}:
-                current["qty"] = col_idx
-                score += 3
-
-            if "unidad" in cell or cell == "u" or "clave unidad" in cell:
-                current["unit"] = col_idx
-                score += 2
-
-            if "valor unitario" in cell or "punit" in cell or "p unit" in cell or "precio unit" in cell:
-                current["unit_price"] = col_idx
-                score += 3
-
-            if "importe del concepto" in cell:
-                current["line_total"] = col_idx
-                score += 4
-            elif cell == "importe" or cell.endswith(" importe"):
-                current["line_total"] = col_idx
-                score += 3
-            elif "importe" in cell and "impuesto" not in cell:
-                current["line_total"] = col_idx
-                score += 2
-
-            if "importe del impuesto" in cell:
-                current["tax_amount"] = col_idx
-
-        if score >= 7 and current["desc"] is not None and current["qty"] is not None:
-            return current
-
-    return best
 
 
 def table_to_matrix(table: Dict[str, Any]) -> List[List[str]]:
@@ -850,672 +231,7 @@ def table_to_matrix(table: Dict[str, Any]) -> List[List[str]]:
     return matrix
 
 
-def make_item(
-    line: str,
-    desc: str,
-    qty: float,
-    unit: str,
-    unit_price: Optional[float],
-    line_total: Optional[float],
-    source: str,
-) -> Dict[str, Any]:
-    if unit_price is not None and line_total is not None and qty > 0:
-        expected = round(unit_price * qty, 2)
-
-        if line_total <= 1 and unit_price > 1:
-            line_total = expected
-
-        if abs(expected - line_total) > max(2.0, line_total * 0.08):
-            calculated_unit = round(line_total / qty, 4)
-
-            if calculated_unit > 0:
-                unit_price = calculated_unit
-
-    if line_total is None and unit_price is not None and qty > 0:
-        line_total = round(unit_price * qty, 2)
-
-    if unit_price is None and line_total is not None and qty > 0:
-        unit_price = round(line_total / qty, 4)
-
-    return {
-        "item_raw": line,
-        "item_name": clean_product_description(desc),
-        "qty": qty,
-        "unit": unit or "pza",
-        "unit_price": unit_price,
-        "line_total": line_total,
-        "ai_meta": {
-            "prodserv": None,
-            "source": source,
-            "has_amounts": bool(line_total and line_total > 0),
-        },
-    }
-
-
-def extract_items_from_header_table(matrix: List[List[str]], header: Dict[str, Any]) -> List[Dict[str, Any]]:
-    items = []
-
-    header_row = header.get("row")
-
-    if header_row is None:
-        return items
-
-    desc_col = header.get("desc")
-    qty_col = header.get("qty")
-    unit_col = header.get("unit")
-    unit_price_col = header.get("unit_price")
-    line_total_col = header.get("line_total")
-
-    if desc_col is None or qty_col is None:
-        return items
-
-    for row in matrix[int(header_row) + 1:]:
-        if not row:
-            continue
-
-        values = [normalize_spaces(v) for v in row]
-        line = " | ".join([v for v in values if v])
-
-        if not line:
-            continue
-
-        low_line = normalize_plain(line)
-
-        if any(header_text in low_line for header_text in [
-            "clave productos y servicios",
-            "no identificacion",
-            "no. identificacion",
-            "cantidad",
-            "clave unidad",
-            "descripcion",
-            "valor unitario",
-            "importe del concepto",
-            "importe del impuesto",
-            "tipo factor",
-            "tasa",
-        ]) and not re.search(r"\b[0-9]{2,6}\b", low_line):
-            continue
-
-        desc = values[desc_col] if desc_col < len(values) else ""
-        desc = clean_product_description(desc)
-
-        if not desc:
-            continue
-
-        if row_is_noise(desc):
-            continue
-
-        if len(desc) < 5 or not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", desc):
-            continue
-
-        desc_low = normalize_plain(desc)
-
-        if any(word in desc_low for word in [
-            "descripcion",
-            "valor unitario",
-            "importe del concepto",
-            "clave unidad",
-            "clave productos",
-            "servicios",
-        ]):
-            continue
-
-        qty_raw = values[qty_col] if qty_col < len(values) else ""
-        qty = parse_qty(qty_raw) or 1.0
-
-        unit = ""
-
-        if unit_col is not None and unit_col < len(values):
-            unit = normalize_unit(values[unit_col]) if values[unit_col] else ""
-
-        unit_price = None
-
-        if unit_price_col is not None and unit_price_col < len(values):
-            unit_price = extract_amount_loose(values[unit_price_col], prefer_last=True)
-
-        line_total = None
-
-        if line_total_col is not None and line_total_col < len(values):
-            line_total = extract_amount_loose(values[line_total_col], prefer_last=True)
-
-        if unit_price is None and len(values) > 6:
-            unit_price = extract_amount_loose(values[6], prefer_last=True)
-
-        if line_total is None and len(values) > 7:
-            line_total = extract_amount_loose(values[7], prefer_last=True)
-
-        items.append(
-            make_item(
-                line=line,
-                desc=desc,
-                qty=qty,
-                unit=unit or "pza",
-                unit_price=unit_price,
-                line_total=line_total,
-                source="azure_document_intelligence_table_header",
-            )
-        )
-
-    return items
-
-
-def extract_exel_shape_items_from_matrix(matrix: List[List[str]]) -> List[Dict[str, Any]]:
-    items = []
-
-    for row in matrix:
-        values = [normalize_spaces(value) for value in row]
-
-        if len(values) < 8:
-            continue
-
-        line = " | ".join([value for value in values if value])
-
-        if not line:
-            continue
-
-        low_line = normalize_plain(line)
-
-        is_header_row = (
-            "clave productos y servicios" in low_line
-            or "no identificacion" in low_line
-            or "no. identificacion" in low_line
-            or (
-                "cantidad" in low_line
-                and "clave unidad" in low_line
-                and "descripcion" in low_line
-                and "valor unitario" in low_line
-            )
-        )
-
-        if is_header_row:
-            continue
-
-        candidates = [
-            (3, 4, 5, 6, 7),
-            (2, 3, 4, 5, 6),
-            (4, 5, 6, 7, 8),
-        ]
-
-        selected = None
-
-        for qty_idx, unit_idx, desc_idx, price_idx, total_idx in candidates:
-            if max(qty_idx, unit_idx, desc_idx, price_idx, total_idx) >= len(values):
-                continue
-
-            qty = parse_qty(values[qty_idx])
-            desc = clean_product_description(values[desc_idx])
-            unit = normalize_unit(values[unit_idx]) if values[unit_idx] else "pza"
-            unit_price = extract_amount_loose(values[price_idx], prefer_last=True)
-            line_total = extract_amount_loose(values[total_idx], prefer_last=True)
-
-            if not desc:
-                continue
-
-            if row_is_noise(desc):
-                continue
-
-            if len(desc) < 5 or not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", desc):
-                continue
-
-            if qty is None:
-                continue
-
-            if unit_price is None and line_total is None:
-                continue
-
-            selected = {
-                "desc": desc,
-                "qty": qty,
-                "unit": unit,
-                "unit_price": unit_price,
-                "line_total": line_total,
-            }
-            break
-
-        if not selected:
-            continue
-
-        items.append(
-            make_item(
-                line=line,
-                desc=selected["desc"],
-                qty=selected["qty"],
-                unit=selected["unit"] or "pza",
-                unit_price=selected["unit_price"],
-                line_total=selected["line_total"],
-                source="azure_document_intelligence_table_shape",
-            )
-        )
-
-    return items
-
-
-def detect_document_header(content: str, category: str) -> Dict[str, Any]:
-    text = normalize_spaces(content)
-    lower = text.lower()
-
-    uuid = None
-    uuid_match = re.search(
-        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        text,
-    )
-
-    if uuid_match:
-        uuid = uuid_match.group(0).upper()
-
-    rfc = None
-    rfc_match = re.search(
-        r"\b[A-ZÑ&]{3,4}[0-9]{6}[A-Z0-9]{3}\b",
-        text,
-        flags=re.I,
-    )
-
-    if rfc_match:
-        rfc = rfc_match.group(0).upper()
-
-    currency = "MXN"
-
-    if re.search(r"\bUSD\b|d[oó]lares|dollars", text, flags=re.I):
-        currency = "USD"
-
-    document_type = "otro"
-
-    if "factura" in lower or "cfdi" in lower or uuid:
-        document_type = "factura"
-    elif "remision" in lower or "remisión" in lower:
-        document_type = "remision"
-    elif "ticket" in lower or "recibo" in lower:
-        document_type = "ticket"
-
-    date_value = None
-    date_match = re.search(
-        r"(\d{4}[-/]\d{2}[-/]\d{2})(?:[ T](\d{2}:\d{2}(?::\d{2})?))?",
-        text,
-    )
-
-    if not date_match:
-        date_match = re.search(
-            r"(\d{2}[-/]\d{2}[-/]\d{4})(?:[ T](\d{2}:\d{2}(?::\d{2})?))?",
-            text,
-        )
-
-    if date_match:
-        raw_date = date_match.group(1).replace("/", "-")
-        raw_time = date_match.group(2) or "00:00:00"
-
-        if len(raw_time) == 5:
-            raw_time += ":00"
-
-        parts = raw_date.split("-")
-
-        if len(parts[0]) == 4:
-            date_value = f"{raw_date} {raw_time}"
-        else:
-            date_value = f"{parts[2]}-{parts[1]}-{parts[0]} {raw_time}"
-
-    subtotal = 0
-    tax = 0
-    total = 0
-
-    subtotal_patterns = [
-        r"\bsub\s*total\b\s*:?\s*\$?\s*([0-9,]+(?:\.[0-9]{2})?)",
-        r"\bsubtotal\b\s*:?\s*\$?\s*([0-9,]+(?:\.[0-9]{2})?)",
-    ]
-
-    for pattern in subtotal_patterns:
-        match = re.search(pattern, text, flags=re.I)
-
-        if match:
-            subtotal = money_to_float(match.group(1)) or 0
-            break
-
-    tax_patterns = [
-        r"\biva\b\s*:?\s*\$?\s*([0-9,]+(?:\.[0-9]{2})?)",
-        r"\bimpuesto\b\s*:?\s*\$?\s*([0-9,]+(?:\.[0-9]{2})?)",
-        r"\btax\b\s*:?\s*\$?\s*([0-9,]+(?:\.[0-9]{2})?)",
-    ]
-
-    for pattern in tax_patterns:
-        match = re.search(pattern, text, flags=re.I)
-
-        if match:
-            tax = money_to_float(match.group(1)) or 0
-            break
-
-    total_matches = re.findall(
-        r"\btotal\b\s*:?\s*\$?\s*([0-9,]+(?:\.[0-9]{2})?)",
-        text,
-        flags=re.I,
-    )
-
-    if total_matches:
-        total = money_to_float(total_matches[-1]) or 0
-
-    supplier_name = None
-    lines = [normalize_spaces(line) for line in content.splitlines() if normalize_spaces(line)]
-
-    for line in lines[:80]:
-        low = normalize_plain(line)
-
-        if any(skip in low for skip in [
-            "factura",
-            "cfdi",
-            "rfc",
-            "fecha",
-            "folio",
-            "uuid",
-            "total",
-            "subtotal",
-            "certificado",
-            "sello",
-            "cadena original",
-            "gobierno de mexico",
-        ]):
-            continue
-
-        if len(line) >= 4 and re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", line):
-            supplier_name = line[:180]
-            break
-
-    return {
-        "document_type": document_type,
-        "supplier_name": supplier_name,
-        "counterparty_rfc": rfc,
-        "uuid": uuid,
-        "serie": None,
-        "folio": None,
-        "currency": currency,
-        "document_datetime": date_value,
-        "subtotal": subtotal,
-        "tax": tax,
-        "total": total,
-    }
-
-
-def infer_qty_from_values(values: List[str], description: str, unit: str) -> float:
-    numeric_cells = []
-
-    for value in values:
-        text = normalize_spaces(value)
-
-        if text == description:
-            continue
-
-        if unit and normalize_unit(text) == unit:
-            continue
-
-        number = parse_number(text)
-
-        if number is None:
-            continue
-
-        if number <= 0:
-            continue
-
-        numeric_cells.append(number)
-
-    if not numeric_cells:
-        return 1.0
-
-    if len(numeric_cells) >= 2:
-        qty = numeric_cells[1]
-    else:
-        qty = numeric_cells[0]
-
-    if qty <= 0:
-        return 1.0
-
-    return round(qty, 3)
-
-
-def infer_amounts_from_values(values: List[str], qty: float) -> Dict[str, Optional[float]]:
-    amount_cells = []
-
-    for value in values:
-        amount = extract_money_from_cell(value)
-
-        if amount is not None and amount > 0:
-            amount_cells.append(amount)
-
-    unit_price = None
-    line_total = None
-
-    if len(amount_cells) >= 2:
-        unit_price = amount_cells[-2]
-        line_total = amount_cells[-1]
-    elif len(amount_cells) == 1:
-        unit_price = amount_cells[0]
-        line_total = round(unit_price * qty, 2) if qty > 0 else None
-
-    return {
-        "unit_price": unit_price,
-        "line_total": line_total,
-    }
-
-
-def extract_items_from_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    items = []
-
-    for table in tables:
-        matrix = table_to_matrix(table)
-
-        header = detect_header_map(matrix)
-        header_items = extract_items_from_header_table(matrix, header)
-
-        if header_items:
-            items.extend(header_items)
-            continue
-
-        shape_items = extract_exel_shape_items_from_matrix(matrix)
-
-        if shape_items:
-            items.extend(shape_items)
-            continue
-
-        for row in matrix:
-            values = [normalize_spaces(value) for value in row if normalize_spaces(value)]
-
-            if not values:
-                continue
-
-            line = " | ".join(values)
-
-            if row_is_noise(line):
-                continue
-
-            item_name = choose_description_from_values(values)
-
-            if not item_name:
-                continue
-
-            if row_is_noise(item_name):
-                continue
-
-            if not looks_like_real_product_description(item_name):
-                continue
-
-            unit = choose_unit_from_values(values)
-
-            if not unit and has_product_unit_signal(item_name):
-                unit_match = re.search(
-                    r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
-                    item_name,
-                    flags=re.I,
-                )
-
-                if unit_match:
-                    unit = normalize_unit(unit_match.group(1))
-
-            qty = infer_qty_from_values(values, item_name, unit)
-            amounts = infer_amounts_from_values(values, qty)
-
-            items.append(
-                make_item(
-                    line=line,
-                    desc=item_name,
-                    qty=qty,
-                    unit=unit or "pza",
-                    unit_price=amounts["unit_price"],
-                    line_total=amounts["line_total"],
-                    source="azure_document_intelligence_table",
-                )
-            )
-
-    return items
-
-
-def extract_items_from_lines(content: str) -> List[Dict[str, Any]]:
-    items = []
-
-    for raw_line in content.splitlines():
-        line = normalize_spaces(raw_line)
-
-        if row_is_noise(line):
-            continue
-
-        if not looks_like_real_product_description(line):
-            continue
-
-        money_values = find_money_values(line)
-        qty = find_qty_values(line) or 1.0
-        unit_price = None
-        line_total = None
-
-        if len(money_values) >= 2:
-            unit_price = money_values[-2]
-            line_total = money_values[-1]
-        elif len(money_values) == 1:
-            unit_price = money_values[-1]
-            line_total = round(unit_price * qty, 2) if qty > 0 else None
-
-        item_name = clean_product_description(line)
-
-        if not item_name:
-            continue
-
-        if row_is_noise(item_name):
-            continue
-
-        unit = ""
-
-        if has_product_unit_signal(item_name):
-            unit_match = re.search(
-                r"\b(PZA|PIEZA|PZ|PQTE|PQT|PAQUETE|POTE|CAJA|BOLSA|BOTE|ROLLO|KG|LT|SERVICIO|JGO|JUEGO|PAR)\b",
-                item_name,
-                flags=re.I,
-            )
-
-            if unit_match:
-                unit = normalize_unit(unit_match.group(1))
-
-        items.append(
-            make_item(
-                line=line,
-                desc=item_name,
-                qty=qty,
-                unit=unit or "pza",
-                unit_price=unit_price,
-                line_total=line_total,
-                source="azure_document_intelligence_content",
-            )
-        )
-
-    return items
-
-
-def dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    seen = set()
-    output = []
-
-    for item in items:
-        name = normalize_spaces(item.get("item_name", "")).lower()
-
-        if not name:
-            continue
-
-        key = (
-            name,
-            str(item.get("qty", "")),
-            str(item.get("unit", "")),
-            str(item.get("unit_price", "")),
-            str(item.get("line_total", "")),
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        output.append(item)
-
-    return output
-
-
-def convert_azure_result_to_purchase_json(azure_result: Dict[str, Any], category: str) -> Dict[str, Any]:
-    analyze_result = azure_result.get("analyzeResult", {})
-
-    content = analyze_result.get("content", "") or ""
-    tables = analyze_result.get("tables", []) or []
-    pages = analyze_result.get("pages", []) or []
-
-    document = detect_document_header(content, category)
-
-    items = extract_items_from_tables(tables)
-
-    if not items:
-        items = extract_items_from_lines(content)
-
-    items = dedupe_items(items)
-
-    items_with_amounts = [
-        item
-        for item in items
-        if item.get("line_total") is not None and float(item.get("line_total") or 0) > 0
-    ]
-
-    if document.get("subtotal", 0) <= 0 and items_with_amounts:
-        document["subtotal"] = round(
-            sum(float(item.get("line_total") or 0) for item in items_with_amounts),
-            2,
-        )
-
-    if document.get("tax", 0) <= 0 and document.get("subtotal", 0) > 0:
-        document["tax"] = round(float(document["subtotal"]) * 0.16, 2)
-
-    if document.get("total", 0) <= 0 and document.get("subtotal", 0) > 0:
-        document["total"] = round(float(document["subtotal"]) + float(document.get("tax", 0) or 0), 2)
-
-    warnings = []
-
-    if not items:
-        warnings.append("Azure Document Intelligence no detectó conceptos.")
-
-    if items and not items_with_amounts:
-        warnings.append("Se detectaron conceptos, pero no se detectaron importes confiables.")
-
-    if not content:
-        warnings.append("Azure Document Intelligence no devolvió contenido textual.")
-
-    return {
-        "document": document,
-        "items": items,
-        "notes": {
-            "warnings": warnings,
-            "confidence": 0.85 if items else 0.35,
-            "engine": "azure_document_intelligence",
-            "pages": len(pages),
-            "tables": len(tables),
-            "items_count": len(items),
-            "items_with_amounts": len(items_with_amounts),
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Capa OpenAI: estructura la salida cruda de Azure en items limpios
-# ---------------------------------------------------------------------------
-
 def _flatten_azure_tables(tables: List[Dict[str, Any]]) -> str:
-    """Convierte las tablas detectadas por Azure a texto plano para mandárselo a OpenAI."""
     out = []
 
     for ti, table in enumerate(tables, start=1):
@@ -1534,80 +250,83 @@ def _flatten_azure_tables(tables: List[Dict[str, Any]]) -> str:
     return "\n\n".join(out)
 
 
-def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Optional[Dict[str, Any]]:
-    """Usa OpenAI para estructurar la salida cruda de Azure en items limpios.
+# ---------------------------------------------------------------------------
+# OpenAI: la IA hace TODO el trabajo de identificar productos vs basura
+# ---------------------------------------------------------------------------
 
-    Devuelve None si OpenAI no está disponible o falla, para que el caller
-    pueda caer al parser Azure-only.
-    """
-    try:
-        from openai import OpenAI
-    except ImportError:
-        _log("openai package no instalado, se omite estructurado con OpenAI")
-        return None
+OPENAI_SYSTEM_PROMPT = """Eres un extractor experto de documentos contables mexicanos (CFDI 4.0, facturas, tickets, remisiones, notas de venta, recibos de honorarios, comprobantes de cualquier proveedor).
 
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+Tu tarea es leer lo que Azure Document Intelligence extrajo de un PDF y devolver un JSON ESTRICTO con:
+1. Los datos generales del documento.
+2. ÚNICAMENTE las líneas reales de productos o servicios facturados.
 
-    if not api_key:
-        _log("OPENAI_API_KEY no configurada, se usa solo Azure")
-        return None
+Tú ya sabes cómo se ve una factura mexicana sin que te lo digan. Aplica ese criterio.
 
-    analyze_result = azure_result.get("analyzeResult", {})
-    content = (analyze_result.get("content", "") or "")[:35000]
-    tables = analyze_result.get("tables", []) or []
-    tables_text = _flatten_azure_tables(tables)[:35000]
+REGLAS DE NEGOCIO:
+- Devuelve SOLO los renglones que son productos/servicios reales facturados al cliente.
+- IGNORA TODO lo que sea: subtotales, totales, IVA, ISR, IEPS, retenciones, traslados, monto del impuesto, importe en letra ("NUEVE MIL QUINIENTOS PESOS"), sellos digitales, cadenas originales, datos del emisor/receptor, RFCs sueltos, fechas, números de serie, claves SAT sueltas, leyendas legales, condiciones de pago, observaciones, encabezados de tabla.
+- Si una celda mezcla descripción del producto con basura del pie (códigos SAT pegados, "Traslado Base", texto del importe en letras, etc.), QUEDATE SOLO con la descripción real del producto.
+- qty × unit_price debe coincidir con line_total (tolerancia ±2%). Si no coincide, ajusta unit_price tomando line_total como verdadero.
+- Si la factura tiene 1 línea real de producto, devuelve UN solo item. Si tiene 50, devuelve los 50. NO inventes filas extra ni dupliques.
+- Conserva acentos y mayúsculas/minúsculas naturales del nombre del producto.
+- document_datetime en formato "YYYY-MM-DD HH:MM:SS". Si solo hay fecha sin hora, usa "YYYY-MM-DD 00:00:00".
+- Para campos de item que no veas con claridad, usa null (NO 0).
+- Para subtotal/tax/total del document, usa 0 si no aparecen.
+- unit debe ser la unidad real del producto (PIEZA, CAJA, KG, LT, SERVICIO, etc.), no códigos SAT como "H87".
 
-    party_hint = (
-        "El cliente / receptor es la empresa que paga (NO el emisor)."
-        if category == "venta"
-        else "El proveedor / emisor es quien factura."
-    )
-
-    prompt = f"""Eres un extractor experto de facturas mexicanas (CFDI 4.0, tickets, remisiones).
-
-Categoría: {category}
-{party_hint}
-
-Te paso el TEXTO CRUDO y las TABLAS DETECTADAS por Azure Document Intelligence sobre un documento.
-Devuelve SOLO los renglones REALES de la TABLA DE CONCEPTOS. NO inventes filas.
-
-REGLAS ESTRICTAS:
-- Ignora pies de página, totales, IVA, traslados, retenciones, sellos, cantidades en letra, RFC sueltos.
-- Si una celda de descripción incluye basura del pie (claves SAT pegadas, "Traslado Base", "Importe con", cantidad en letra tipo "NUEVE MIL QUINIENTOS OCHENTA Y SIETE PESOS"), RECÓRTALA: solo deja la descripción real del producto.
-- qty * unit_price DEBE coincidir con line_total (tolerancia ±2%). Si no coincide, ajusta unit_price para que cuadre con line_total.
-- Si la factura tiene 1 sola línea de producto, devuelve UN solo item. NO inventes filas adicionales.
-- Si Azure pegó código de barras o clave del SAT en la descripción, EXCLÚYELOS de item_name.
-- Conserva acentos, mayúsculas y minúsculas naturales del producto.
-- document_datetime en formato "YYYY-MM-DD HH:MM:SS". Si solo hay fecha, usa "YYYY-MM-DD 00:00:00".
-- Si no estás seguro de un valor de item, usa null (NO 0). En subtotal/tax/total del document, si no se ve usa 0.
-
-FORMATO JSON ESTRICTO (responde SOLO esto, sin markdown):
-{{
-  "document": {{
-    "document_type": "factura|ticket|remision|otro",
+FORMATO JSON ESTRICTO (responde SOLO esto, sin markdown, sin ```):
+{
+  "document": {
+    "document_type": "factura|ticket|remision|nota|recibo|otro",
     "supplier_name": null,
     "counterparty_rfc": null,
     "uuid": null,
     "serie": null,
     "folio": null,
     "currency": "MXN",
-    "document_datetime": "YYYY-MM-DD HH:MM:SS",
+    "document_datetime": null,
     "subtotal": 0,
     "tax": 0,
     "total": 0
-  }},
+  },
   "items": [
-    {{
-      "item_name": "descripción limpia del producto/servicio",
-      "qty": 0,
+    {
+      "item_name": "descripción real del producto o servicio",
+      "qty": 1,
       "unit": "PIEZA",
       "unit_price": 0,
       "line_total": 0,
       "prodserv_code": null
-    }}
+    }
   ]
-}}
+}"""
+
+
+def structure_with_openai(azure_result: Dict[str, Any], category: str) -> Dict[str, Any]:
+    """Manda lo que Azure extrajo a OpenAI y deja que la IA decida qué es producto."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise Exception("El paquete 'openai' no está instalado. Ejecuta: pip3 install --user openai")
+
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    if not api_key:
+        raise Exception("Falta OPENAI_API_KEY en el entorno.")
+
+    analyze_result = azure_result.get("analyzeResult", {})
+    content = (analyze_result.get("content", "") or "")[:40000]
+    tables = analyze_result.get("tables", []) or []
+    tables_text = _flatten_azure_tables(tables)[:40000]
+
+    party_hint = (
+        "El documento es una VENTA emitida por nosotros. El cliente / receptor es la contraparte (NO nosotros)."
+        if category == "venta"
+        else "El documento es una COMPRA que nos hicieron. El proveedor / emisor es la contraparte."
+    )
+
+    user_prompt = f"""{party_hint}
 
 === TEXTO CRUDO DEL DOCUMENTO ===
 {content}
@@ -1616,25 +335,20 @@ FORMATO JSON ESTRICTO (responde SOLO esto, sin markdown):
 {tables_text or "(Azure no detectó tablas estructuradas)"}
 """
 
-    try:
-        client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key)
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Responde únicamente JSON válido. No uses markdown ni bloques ```."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            response_format={"type": "json_object"},
-        )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": OPENAI_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
 
-        raw = response.choices[0].message.content or "{}"
-        return json.loads(raw)
-
-    except Exception as e:
-        _log(f"OpenAI structuring failed: {e}")
-        return None
+    raw = response.choices[0].message.content or "{}"
+    return json.loads(raw)
 
 
 def convert_openai_result_to_purchase_json(
@@ -1642,7 +356,7 @@ def convert_openai_result_to_purchase_json(
     azure_result: Dict[str, Any],
     category: str,
 ) -> Dict[str, Any]:
-    """Adapta el JSON de OpenAI al formato que espera PHP (PublicationPurchaseAiService)."""
+    """Adapta el JSON de OpenAI al formato que espera PHP."""
     doc_in = openai_result.get("document", {}) or {}
     items_in = openai_result.get("items", []) or []
 
@@ -1653,7 +367,7 @@ def convert_openai_result_to_purchase_json(
             continue
 
         name = normalize_spaces(it.get("item_name") or "")
-        if not name or len(name) < 3:
+        if not name:
             continue
 
         qty_raw = it.get("qty")
@@ -1683,7 +397,7 @@ def convert_openai_result_to_purchase_json(
         if unit_price is None and line_total is not None and qty > 0:
             unit_price = round(line_total / qty, 4)
 
-        unit = normalize_unit(it.get("unit") or "pza") or "pza"
+        unit = normalize_spaces(it.get("unit") or "PIEZA").upper() or "PIEZA"
 
         items_out.append({
             "item_raw": name,
@@ -1738,7 +452,7 @@ def convert_openai_result_to_purchase_json(
 
     warnings = []
     if not items_out:
-        warnings.append("OpenAI no detectó conceptos a partir de la lectura de Azure.")
+        warnings.append("La IA no identificó productos en el documento.")
 
     return {
         "document": document,
@@ -1758,13 +472,11 @@ def convert_openai_result_to_purchase_json(
 
 def main():
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--file", required=True)
     parser.add_argument("--category", default="compra")
     parser.add_argument("--model", default="prebuilt-layout")
     parser.add_argument("--pages-per-chunk", type=int, default=5)
     parser.add_argument("--raw", action="store_true", help="Devuelve respuesta cruda de Azure (debug)")
-    parser.add_argument("--no-openai", action="store_true", help="Omite estructurado con OpenAI")
 
     args = parser.parse_args()
 
@@ -1784,32 +496,20 @@ def main():
         print(json.dumps(azure_result, ensure_ascii=False))
         return
 
-    if not args.no_openai:
-        openai_result = structure_with_openai(azure_result, args.category)
+    openai_result = structure_with_openai(azure_result, args.category)
 
-        if openai_result and openai_result.get("items"):
-            final = convert_openai_result_to_purchase_json(
-                openai_result=openai_result,
-                azure_result=azure_result,
-                category=args.category,
-            )
-            print(json.dumps(final, ensure_ascii=False))
-            return
-
-        _log("OpenAI no devolvió items útiles. Se cae al parser Azure-only.")
-
-    normalized = convert_azure_result_to_purchase_json(
+    final = convert_openai_result_to_purchase_json(
+        openai_result=openai_result,
         azure_result=azure_result,
         category=args.category,
     )
 
-    print(json.dumps(normalized, ensure_ascii=False))
+    print(json.dumps(final, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     try:
         main()
-
     except Exception as e:
         print(
             json.dumps({"error": str(e)}, ensure_ascii=False),
