@@ -158,6 +158,20 @@ def _normalize_yes_no(value):
     return _normalize_text(value)
 
 
+def _split_partida_subpartida(valor):
+    """ '1.1' -> (1, '1') ; '1' -> (1, None) ; texto -> (None, texto)."""
+    if valor is None:
+        return (None, None)
+    txt = str(valor).strip()
+    m = re.match(r"^(\d+)[.\-](\d+[a-zA-Z]?)$", txt)
+    if m:
+        return (_normalize_number(m.group(1)), m.group(2))
+    n = _normalize_number(txt)
+    if n is not None:
+        return (n, None)
+    return (None, txt if txt else None)
+
+
 def _build_table_matrix(table: Dict[str, Any]) -> List[List[str]]:
     row_count = table.get("rowCount", 0)
     col_count = table.get("columnCount", 0)
@@ -258,13 +272,16 @@ def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[D
             return None
         return _normalize_text(row[idx])
 
-    numero = get_col("numero") or get_col("partida")
-    numero_normalizado = _normalize_number(numero)
-
+    numero_raw = get_col("numero") or get_col("partida")
     subpartida_raw = get_col("subpartida")
-    subpartida = _normalize_number(subpartida_raw)
-    if subpartida is None and subpartida_raw:
-        subpartida = subpartida_raw
+
+    # Separa "1.1" -> partida 1 / subpartida 1
+    partida, subpartida = _split_partida_subpartida(numero_raw)
+
+    # Si hay columna de SUBPARTIDA aparte, esa manda.
+    if subpartida_raw:
+        s = _normalize_number(subpartida_raw)
+        subpartida = s if s is not None else subpartida_raw
 
     descripcion = get_col("descripcion")
     unidad = get_col("unidad")
@@ -273,11 +290,12 @@ def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[D
     cantidad = _normalize_number(get_col("cantidad"))
     muestra = _normalize_yes_no(get_col("muestra"))
 
-    if not numero_normalizado:
+    # Si no hay número en columnas, intenta con la primera celda (ej. "1.1").
+    if partida is None and subpartida is None:
         values = [_normalize_text(x) or "" for x in row]
         non_empty = [v for v in values if v]
-        if non_empty and re.match(r"^\d{1,6}$", non_empty[0]):
-            numero_normalizado = _normalize_number(non_empty[0])
+        if non_empty:
+            partida, subpartida = _split_partida_subpartida(non_empty[0])
 
     if not descripcion:
         used_indexes = set(mapping.values())
@@ -288,7 +306,7 @@ def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[D
                 continue
             if idx in used_indexes:
                 continue
-            if re.match(r"^\d{1,6}$", clean):
+            if re.match(r"^\d+([.\-]\d+)?$", clean):  # ignora "1" o "1.1"
                 continue
             leftovers.append(clean)
         descripcion = " ".join(leftovers).strip() if leftovers else None
@@ -298,9 +316,9 @@ def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[D
         return None
 
     return {
-        "partida": numero_normalizado,
+        "partida": partida,
         "subpartida": subpartida,
-        "numero": numero_normalizado,
+        "numero": partida,
         "descripcion": descripcion,
         "nombre": descripcion,
         "unidad": unidad,
@@ -318,7 +336,7 @@ def _extract_heuristic(row: List[str]) -> Optional[Dict[str, Any]]:
         return None
 
     first = non_empty[0]
-    numero = _normalize_number(first) if re.match(r"^\d{1,6}$", first) else None
+    partida, subpartida = _split_partida_subpartida(first)
 
     numbers_after = []
     text_parts = []
@@ -331,7 +349,7 @@ def _extract_heuristic(row: List[str]) -> Optional[Dict[str, Any]]:
         "unidad", "frasco", "bote", "sobre", "hoja", "block"
     ]
 
-    start = 1 if numero is not None else 0
+    start = 1 if (partida is not None or subpartida is not None) else 0
     for value in non_empty[start:]:
         value_clean = value.strip()
         num = _normalize_number(value_clean)
@@ -361,9 +379,9 @@ def _extract_heuristic(row: List[str]) -> Optional[Dict[str, Any]]:
         cantidad = numbers_after[0]
 
     return {
-        "partida": numero,
-        "subpartida": None,
-        "numero": numero,
+        "partida": partida,
+        "subpartida": subpartida,
+        "numero": partida,
         "descripcion": descripcion,
         "nombre": descripcion,
         "unidad": unidad,
@@ -428,8 +446,8 @@ def _extract_items_from_text(raw_text: str) -> List[Dict[str, Any]]:
 
     while i < len(lines):
         line = lines[i]
-        if re.match(r"^\d{1,6}$", line):
-            numero = _normalize_number(line)
+        if re.match(r"^\d+([.\-]\d+)?$", line):
+            partida, subpartida = _split_partida_subpartida(line)
             chunk = lines[i:i + 8]
             nums = []
             unidad = None
@@ -444,11 +462,11 @@ def _extract_items_from_text(raw_text: str) -> List[Dict[str, Any]]:
                 if len(part) > 8:
                     desc_parts.append(part)
             descripcion = " ".join(desc_parts).strip()
-            if numero and descripcion and len(descripcion) >= 10:
+            if (partida is not None or subpartida is not None) and descripcion and len(descripcion) >= 10:
                 items.append({
-                    "partida": numero,
-                    "subpartida": None,
-                    "numero": numero,
+                    "partida": partida,
+                    "subpartida": subpartida,
+                    "numero": partida,
                     "descripcion": descripcion,
                     "nombre": descripcion,
                     "unidad": unidad,
