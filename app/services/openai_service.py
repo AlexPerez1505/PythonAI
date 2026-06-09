@@ -209,7 +209,14 @@ def _header_key(text: str) -> str:
     txt = txt.replace(".", "").replace(":", "").replace("#", "")
     txt = re.sub(r"\s+", " ", txt).strip()
 
-    if any(k in txt for k in ["núm prog", "num prog", "no", "n°", "numero", "número", "partida", "subpartida", "renglon", "renglón"]):
+    # SUBPARTIDA primero (para no confundirla con partida).
+    if "subpartida" in txt or "sub partida" in txt:
+        return "subpartida"
+
+    if txt in ["no", "n°", "núm", "num"]:
+        return "numero"
+
+    if any(k in txt for k in ["núm prog", "num prog", "numero", "número", "partida", "renglon", "renglón"]):
         return "numero"
 
     if any(k in txt for k in ["cant min", "cantidad min", "mínima", "minima"]):
@@ -297,13 +304,14 @@ def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[D
             return None
         return _normalize_text(row[idx])
 
-    numero = (
-        get_col("numero")
-        or get_col("partida")
-        or get_col("subpartida")
-    )
-
+    numero = get_col("numero") or get_col("partida")
     numero_normalizado = _normalize_number(numero)
+
+    # Subpartida: solo si el documento trae esa columna.
+    subpartida_raw = get_col("subpartida")
+    subpartida = _normalize_number(subpartida_raw)
+    if subpartida is None and subpartida_raw:
+        subpartida = subpartida_raw  # conserva el texto si no es numérico
 
     descripcion = get_col("descripcion")
     unidad = get_col("unidad")
@@ -342,7 +350,7 @@ def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[D
 
     return {
         "partida": numero_normalizado,
-        "subpartida": None,
+        "subpartida": subpartida,
         "numero": numero_normalizado,
         "descripcion": descripcion,
         "nombre": descripcion,
@@ -525,13 +533,14 @@ def _dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen = set()
 
     for item in items:
-        numero = str(item.get("numero") or item.get("partida") or item.get("subpartida") or "").strip()
+        numero = str(item.get("numero") or item.get("partida") or "").strip()
+        sub = str(item.get("subpartida") or "").strip()
         desc = str(item.get("descripcion") or item.get("nombre") or "").strip().lower()
 
         if not numero or not desc:
             continue
 
-        key = (numero, desc[:120])
+        key = (numero, sub, desc[:120])
 
         if key in seen:
             continue
@@ -549,6 +558,55 @@ def _dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted(unique, key=sort_key)
 
 
+def _suma_cantidades(a, b):
+    na = _normalize_number(a)
+    nb = _normalize_number(b)
+    if na is None and nb is None:
+        return None
+    return (na or 0) + (nb or 0)
+
+
+def _clave_descripcion(desc: str) -> str:
+    """Normaliza la descripción para detectar si dos partidas son el mismo producto."""
+    txt = (desc or "").lower()
+    txt = txt.translate(str.maketrans("áéíóúñ", "aeioun"))
+    txt = re.sub(r"[^a-z0-9 ]", " ", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
+def _merge_items_por_descripcion(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Une partidas con la MISMA descripción/nombre y suma sus cantidades."""
+    agrupados: Dict[str, Dict[str, Any]] = {}
+    orden: List[str] = []
+
+    for item in items:
+        desc = item.get("descripcion") or item.get("nombre") or ""
+        key = _clave_descripcion(desc)
+        if not key:
+            continue
+
+        if key not in agrupados:
+            agrupados[key] = dict(item)
+            orden.append(key)
+            continue
+
+        base = agrupados[key]
+
+        base["cantidad"] = _suma_cantidades(base.get("cantidad"), item.get("cantidad"))
+        base["cantidad_minima"] = _suma_cantidades(base.get("cantidad_minima"), item.get("cantidad_minima"))
+        base["cantidad_maxima"] = _suma_cantidades(base.get("cantidad_maxima"), item.get("cantidad_maxima"))
+
+        if not base.get("unidad") and item.get("unidad"):
+            base["unidad"] = item.get("unidad")
+        if not base.get("subpartida") and item.get("subpartida"):
+            base["subpartida"] = item.get("subpartida")
+        if not base.get("presentar_muestra") and item.get("presentar_muestra"):
+            base["presentar_muestra"] = item.get("presentar_muestra")
+
+    return [agrupados[k] for k in orden]
+
+
 def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[str, Any]:
     tables = raw_analyze_result.get("tables", []) or []
     all_items = []
@@ -562,6 +620,12 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
         all_items.extend(_extract_items_from_text(raw_text))
 
     unique = _dedupe_items(all_items)
+    unique = _merge_items_por_descripcion(unique)
+
+    # SIEMPRE debe haber unidad de medida.
+    for it in unique:
+        if not it.get("unidad"):
+            it["unidad"] = "PIEZA"
 
     return {
         "items_count": len(unique),
