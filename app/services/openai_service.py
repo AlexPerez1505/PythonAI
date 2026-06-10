@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 
@@ -155,7 +156,7 @@ _PROMPT_SISTEMA_ITEMS = (
     "REGLAS DE VALIDACIÓN (muy importante):\n"
     "- Un renglón VÁLIDO describe un producto/servicio real. Si una fila NO lo es, OMÍTELA por completo.\n"
     "- NUNCA devuelvas como producto: encabezados de columna ('Descripción', 'Cantidad', 'Unidad', "
-    "'Costo unitario antes de IVA', 'Precio', 'Partida'), números de página/hoja ('1 de 16', 'Hoja 3'), "
+    "'Costo unitario antes de IVA', 'Precio', 'Partida'), números de página/hoja ('1 de 16', 'Hoja 3', 'HOJA'), "
     "etiquetas de formulario (FECHA, HORARIO, DOMICILIO, LUGAR, NOMBRE), fechas u horarios "
     "('8:30 a 13:00 horas'), domicilios o direcciones, nombres de dependencias o áreas, "
     "totales/subtotales, firmas, ni notas o instrucciones.\n"
@@ -191,9 +192,9 @@ def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
         items = data.get("items") or []
         return items if isinstance(items, list) else []
     except Exception as e:
-        # No lo ocultes: si OpenAI falla (ej. modelo sin acceso), entérate en consola.
-        print(f"[extract_items] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}", flush=True)
-        raise
+        # IMPORTANTE: por stderr, NUNCA por stdout (rompería el JSON que lee Laravel).
+        print(f"[extract_items] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}", file=sys.stderr, flush=True)
+        return []
 
 
 def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[str, Any]:
