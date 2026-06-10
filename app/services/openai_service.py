@@ -10,7 +10,7 @@ from openai import OpenAI
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -168,7 +168,8 @@ _PROMPT_SISTEMA_ITEMS = (
     "- 'subpartida': solo para numeración jerárquica (lo que va después del punto); si no aplica, null.\n"
     "- 'unidad': unidad de medida (PIEZA, CAJA, PAQUETE, KG...). Si cantidad y unidad vienen juntas "
     "('10 caja/paquete 90 piezas'), pon cantidad=10 y unidad='CAJA'.\n"
-    "- 'cantidad': cantidad solicitada (número). 'cantidad_minima'/'cantidad_maxima' si trae mínimo y máximo.\n"
+    "- 'cantidad': cantidad solicitada (número). 'cantidad_minima'/'cantidad_maxima' si trae mínimo y máximo. "
+    "OJO: la columna de 'Partida'/'No.' (1, 2, 3...) NO es la cantidad; si no hay cantidad real, deja cantidad en null.\n"
     "- 'muestra': 'Si'/'No' si la tabla lo indica; si no, null.\n\n"
     "Devuelve SOLO JSON con esta forma EXACTA: "
     "{\"items\":[{\"partida\":null,\"subpartida\":null,\"clave\":null,\"descripcion\":\"\",\"unidad\":\"\",\"cantidad\":null,\"cantidad_minima\":null,\"cantidad_maxima\":null,\"muestra\":null}]}"
@@ -189,8 +190,10 @@ def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
         data = json.loads(_extract_json_candidate(resp.choices[0].message.content or ""))
         items = data.get("items") or []
         return items if isinstance(items, list) else []
-    except Exception:
-        return []
+    except Exception as e:
+        # No lo ocultes: si OpenAI falla (ej. modelo sin acceso), entérate en consola.
+        print(f"[extract_items] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}", flush=True)
+        raise
 
 
 def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[str, Any]:
