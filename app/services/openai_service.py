@@ -146,48 +146,33 @@ def _matrix_to_rows(matrix: List[List[str]]) -> List[str]:
 
 # ===================== EXTRACCIÓN CON OPENAI (cualquier formato) =====================
 
-_PROMPT_CLASIFICAR = (
-    "Te paso el encabezado y algunas filas de UNA tabla de un documento de licitación de gobierno (México). "
-    "Decide si esta tabla LISTA PRODUCTOS o SERVICIOS solicitados / partidas a cotizar.\n"
-    "Devuelve SOLO JSON: {\"es_productos\": true|false}.\n"
-    "Es false si la tabla es de: fechas o calendario, condiciones/forma de pago, penalizaciones, "
-    "cláusulas o requisitos legales, criterios de evaluación, datos del licitante, firmas, índice, "
-    "glosario, garantías, domicilios, o cualquier cosa que NO sea una lista de bienes/servicios a cotizar.\n"
-    "Ante la duda, responde true."
-)
-
 _PROMPT_SISTEMA_ITEMS = (
-    "Eres un extractor experto de partidas de anexos técnicos de licitaciones públicas en México. "
-    "Te paso filas de una tabla que YA se confirmó que lista productos/servicios "
-    "(cada fila trae sus celdas separadas por ' | '). Extrae CADA renglón que sea un producto/servicio. Reglas:\n"
+    "Eres un extractor experto de partidas de anexos de licitaciones públicas de gobierno en México. "
+    "Te paso filas de una tabla (cada fila trae sus celdas separadas por ' | '). "
+    "Tu trabajo es devolver ÚNICAMENTE los renglones que sean un BIEN o SERVICIO concreto que una "
+    "empresa pueda cotizar/comprar (ej. 'Arillo metálico doble 3/8\"', 'Block con 100 notas autoadheribles', "
+    "'Servicio de mantenimiento de aire acondicionado').\n\n"
+    "REGLAS DE VALIDACIÓN (muy importante):\n"
+    "- Un renglón VÁLIDO describe un producto/servicio real. Si una fila NO lo es, OMÍTELA por completo.\n"
+    "- NUNCA devuelvas como producto: encabezados de columna ('Descripción', 'Cantidad', 'Unidad', "
+    "'Costo unitario antes de IVA', 'Precio', 'Partida'), números de página/hoja ('1 de 16', 'Hoja 3'), "
+    "etiquetas de formulario (FECHA, HORARIO, DOMICILIO, LUGAR, NOMBRE), fechas u horarios "
+    "('8:30 a 13:00 horas'), domicilios o direcciones, nombres de dependencias o áreas, "
+    "totales/subtotales, firmas, ni notas o instrucciones.\n"
+    "- Si TODA la tabla es una portada, formulario, calendario, domicilios o cláusulas (no una lista de "
+    "bienes/servicios), devuelve {\"items\":[]}.\n\n"
+    "CAMPOS por cada producto válido:\n"
     "- 'descripcion': el NOMBRE/DESCRIPCIÓN real del producto. NUNCA pongas aquí el código o la clave.\n"
     "- 'clave': el código/clave de partida presupuestal si existe (ej. '21101-0106'); si no, null.\n"
     "- 'partida': número de partida si existe (entero). Si la numeración es jerárquica '1.1', usa partida=1 y subpartida='1'. Si no hay, null.\n"
     "- 'subpartida': solo para numeración jerárquica (lo que va después del punto); si no aplica, null.\n"
-    "- 'unidad': unidad de medida (PIEZA, CAJA, PAQUETE, KG...). Si cantidad y unidad vienen juntas ('10 caja/paquete 90 piezas'), pon cantidad=10 y unidad='CAJA'.\n"
-    "- 'cantidad': cantidad solicitada (número). 'cantidad_minima'/'cantidad_maxima' si el renglón trae mínimo y máximo.\n"
-    "- 'muestra': 'Si'/'No' si la tabla lo indica; si no, null.\n"
-    "- IGNORA encabezados de la tabla y filas de subtotal/total o notas al pie.\n"
+    "- 'unidad': unidad de medida (PIEZA, CAJA, PAQUETE, KG...). Si cantidad y unidad vienen juntas "
+    "('10 caja/paquete 90 piezas'), pon cantidad=10 y unidad='CAJA'.\n"
+    "- 'cantidad': cantidad solicitada (número). 'cantidad_minima'/'cantidad_maxima' si trae mínimo y máximo.\n"
+    "- 'muestra': 'Si'/'No' si la tabla lo indica; si no, null.\n\n"
     "Devuelve SOLO JSON con esta forma EXACTA: "
     "{\"items\":[{\"partida\":null,\"subpartida\":null,\"clave\":null,\"descripcion\":\"\",\"unidad\":\"\",\"cantidad\":null,\"cantidad_minima\":null,\"cantidad_maxima\":null,\"muestra\":null}]}"
 )
-
-
-def _es_tabla_de_productos(rows: List[str]) -> bool:
-    preview = "\n".join(rows[:8])
-    try:
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _PROMPT_CLASIFICAR},
-                {"role": "user", "content": "Tabla:\n\n" + preview},
-            ],
-        )
-        data = json.loads(_extract_json_candidate(resp.choices[0].message.content or ""))
-        return bool(data.get("es_productos", True))
-    except Exception:
-        return True  # ante la duda, intenta extraer (el extractor también filtra)
 
 
 def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
@@ -219,10 +204,7 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
             rows = _matrix_to_rows(_build_table_matrix(table))
             if len(rows) < 2:
                 continue
-            # 1) Clasifica: ¿esta tabla es de productos?
-            if not _es_tabla_de_productos(rows):
-                continue
-            # 2) Extrae por lotes de 45 filas (tablas que abarcan varias hojas).
+            # Extrae por lotes de 45 filas (tablas que abarcan varias hojas).
             for i in range(0, len(rows), 45):
                 crudos_all.extend(_openai_extract_chunk(rows[i:i + 45]))
 
@@ -270,7 +252,7 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
 
         return {"items_count": len(out), "items": out}
 
-    # ===== Fallback sin OpenAI: heurística básica por fila (todas las tablas) =====
+    # ===== Fallback sin OpenAI: heurística básica por fila =====
     rows_text: List[str] = []
     for table in tables:
         rows_text.extend(_matrix_to_rows(_build_table_matrix(table)))
