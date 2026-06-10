@@ -2,87 +2,23 @@ import hashlib
 import json
 import os
 import re
-import requests
 import sys
 from pathlib import Path
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple
 
+import requests
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=True)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+OPENAI_CORRECT_CHUNK_ITEMS = int(os.getenv("OPENAI_CORRECT_CHUNK_ITEMS", "80"))
 
 
 def _log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
-
-
-def _openai_text(prompt: str) -> str:
-    """
-    Usa Responses API para modelos GPT-5.x / GPT-5.4.
-    Chat Completions puede devolver 404 con algunos modelos aunque aparezcan en /v1/models.
-    """
-    if not OPENAI_API_KEY:
-        raise Exception("Falta OPENAI_API_KEY en .env")
-
-    url = f"{OPENAI_BASE_URL}/responses"
-
-    payload = {
-        "model": OPENAI_MODEL,
-        "input": [
-            {
-                "role": "system",
-                "content": "Responde únicamente JSON válido. No uses markdown.",
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "text": {
-            "format": {
-                "type": "json_object",
-            }
-        },
-    }
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    response = requests.post(url, headers=headers, json=payload, timeout=180)
-
-    if not response.ok:
-        raise Exception(f"OpenAI Responses API error: {response.status_code} - {response.text}")
-
-    data = response.json()
-
-    if isinstance(data.get("output_text"), str) and data["output_text"].strip():
-        return data["output_text"]
-
-    parts = []
-
-    for output in data.get("output", []) or []:
-        for content in output.get("content", []) or []:
-            if isinstance(content, dict):
-                if content.get("type") in ["output_text", "text"] and content.get("text"):
-                    parts.append(content.get("text"))
-                elif content.get("text"):
-                    parts.append(content.get("text"))
-
-    text = "\n".join(parts).strip()
-
-    if not text:
-        raise Exception(f"OpenAI no devolvió texto utilizable: {data}")
-
-    return text
 
 
 def _clean_text(text: str) -> str:
@@ -118,6 +54,129 @@ def _extract_json_candidate(text: str) -> str:
 def _safe_json(text: str):
     return json.loads(_extract_json_candidate(text))
 
+
+def _normalize_text(value):
+    if value is None:
+        return None
+
+    txt = re.sub(r"\s+", " ", str(value)).strip()
+    return txt if txt else None
+
+
+def _normalize_number(value):
+    if value is None:
+        return None
+
+    txt = str(value).strip()
+
+    if txt == "":
+        return None
+
+    txt = txt.replace(",", "").replace(" ", "")
+
+    if not re.match(r"^-?\d+(\.\d+)?$", txt):
+        return None
+
+    try:
+        return float(txt) if "." in txt else int(txt)
+    except Exception:
+        return None
+
+
+def _normalize_for_filter(text: str) -> str:
+    text = _normalize_text(text) or ""
+    text = text.lower()
+
+    replacements = {
+        "á": "a",
+        "é": "e",
+        "í": "i",
+        "ó": "o",
+        "ú": "u",
+        "ü": "u",
+        "ñ": "n",
+    }
+
+    for original, replacement in replacements.items():
+        text = text.replace(original, replacement)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+# ============================================================
+# OpenAI Responses API
+# ============================================================
+
+def _responses_json(system_prompt: str, user_prompt: str, timeout: int = 180) -> Dict[str, Any]:
+    if not OPENAI_API_KEY:
+        raise Exception("Falta OPENAI_API_KEY en .env")
+
+    url = f"{OPENAI_BASE_URL}/responses"
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ],
+        "text": {
+            "format": {
+                "type": "json_object",
+            }
+        },
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+
+    if not response.ok:
+        raise Exception(f"OpenAI Responses API error: {response.status_code} - {response.text}")
+
+    data = response.json()
+
+    if isinstance(data.get("output_text"), str) and data["output_text"].strip():
+        raw_text = data["output_text"]
+    else:
+        parts = []
+
+        for output in data.get("output", []) or []:
+            for content in output.get("content", []) or []:
+                if isinstance(content, dict):
+                    if content.get("type") in ["output_text", "text"] and content.get("text"):
+                        parts.append(content.get("text"))
+                    elif content.get("text"):
+                        parts.append(content.get("text"))
+
+        raw_text = "\n".join(parts).strip()
+
+    if not raw_text:
+        raise Exception(f"OpenAI no devolvió texto utilizable: {data}")
+
+    return _safe_json(raw_text)
+
+
+def _openai_text(prompt: str) -> str:
+    data = _responses_json(
+        "Responde únicamente JSON válido. No uses markdown.",
+        prompt,
+    )
+    return json.dumps(data, ensure_ascii=False)
+
+
+# ============================================================
+# Resumen estructurado de la licitación
+# ============================================================
 
 def structure_licitacion_text(raw_text: str) -> Dict[str, Any]:
     if not OPENAI_API_KEY:
@@ -170,33 +229,9 @@ Texto:
         return {"partidas": []}
 
 
-def _normalize_text(value):
-    if value is None:
-        return None
-
-    txt = re.sub(r"\s+", " ", str(value)).strip()
-    return txt if txt else None
-
-
-def _normalize_number(value):
-    if value is None:
-        return None
-
-    txt = str(value).strip()
-
-    if txt == "":
-        return None
-
-    txt = txt.replace(",", "").replace(" ", "")
-
-    if not re.match(r"^-?\d+(\.\d+)?$", txt):
-        return None
-
-    try:
-        return float(txt) if "." in txt else int(txt)
-    except Exception:
-        return None
-
+# ============================================================
+# Lectura de tablas Azure
+# ============================================================
 
 def _build_table_matrix(table: Dict[str, Any]) -> List[List[str]]:
     row_count = table.get("rowCount", 0)
@@ -209,8 +244,14 @@ def _build_table_matrix(table: Dict[str, Any]) -> List[List[str]]:
         c = cell.get("columnIndex", 0)
         content = _normalize_text(cell.get("content", "")) or ""
 
-        if 0 <= r < row_count and 0 <= c < col_count:
-            matrix[r][c] = content
+        row_span = int(cell.get("rowSpan") or 1)
+        col_span = int(cell.get("columnSpan") or 1)
+
+        for rr in range(r, min(r + row_span, row_count)):
+            for cc in range(c, min(c + col_span, col_count)):
+                if 0 <= rr < row_count and 0 <= cc < col_count:
+                    if not matrix[rr][cc]:
+                        matrix[rr][cc] = content
 
     return matrix
 
@@ -227,7 +268,9 @@ def _matrix_to_rows(matrix: List[List[str]]) -> List[str]:
     return rows
 
 
-# ===================== FILTROS ANTI-BASURA =====================
+# ============================================================
+# Filtros de basura: solo eliminan basura obvia
+# ============================================================
 
 _JUNK_PATTERNS = [
     r"^\d+\s+de\s+\d+$",
@@ -240,6 +283,7 @@ _JUNK_PATTERNS = [
     r"^lugar$",
     r"^nombre$",
     r"^firma$",
+    r"^firmas$",
     r"^subtotal$",
     r"^total$",
     r"^iva$",
@@ -267,33 +311,12 @@ _JUNK_PATTERNS = [
 ]
 
 
-def _normalize_for_filter(text: str) -> str:
-    text = _normalize_text(text) or ""
-    text = text.lower()
-
-    replacements = {
-        "á": "a",
-        "é": "e",
-        "í": "i",
-        "ó": "o",
-        "ú": "u",
-        "ü": "u",
-        "ñ": "n",
-    }
-
-    for original, replacement in replacements.items():
-        text = text.replace(original, replacement)
-
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
 def _looks_like_junk(text: str) -> bool:
     normalized = _normalize_text(text) or ""
     lower = normalized.lower()
     lower_plain = _normalize_for_filter(normalized)
 
-    if len(lower_plain) < 4:
+    if len(lower_plain) < 2:
         return True
 
     for pattern in _JUNK_PATTERNS:
@@ -304,7 +327,6 @@ def _looks_like_junk(text: str) -> bool:
         if re.search(pattern, lower_plain, re.IGNORECASE):
             return True
 
-    # Puro número, fecha, horario o folio corto.
     if re.match(r"^[\d\s.,/\-:]+$", lower_plain):
         return True
 
@@ -348,6 +370,11 @@ def _looks_like_junk(text: str) -> bool:
 
 
 def _looks_like_product_description(text: str) -> bool:
+    """
+    Este filtro NO debe ser estricto.
+    Azure ya leyó la tabla. Aquí solo evitamos basura evidente.
+    Productos reales pueden ser de una palabra: Servilletas, Aguja, Grapas, Clips.
+    """
     normalized = _normalize_text(text) or ""
 
     if _looks_like_junk(normalized):
@@ -355,67 +382,18 @@ def _looks_like_product_description(text: str) -> bool:
 
     letters = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", normalized)
 
-    if len(letters) < 8:
+    if len(letters) < 4:
         return False
 
     words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]+", normalized)
 
-    if len(words) < 2:
+    if not words:
         return False
 
-    lower_plain = _normalize_for_filter(normalized)
+    if len(words) == 1:
+        return len(words[0]) >= 4
 
-    product_signals = [
-        "papel",
-        "cartulina",
-        "folder",
-        "folders",
-        "pluma",
-        "lapiz",
-        "lapices",
-        "boligrafo",
-        "marcador",
-        "corrector",
-        "pegamento",
-        "cinta",
-        "tijera",
-        "grapadora",
-        "grapas",
-        "clip",
-        "clips",
-        "broche",
-        "arillo",
-        "block",
-        "notas",
-        "sobre",
-        "sobres",
-        "carpeta",
-        "archivero",
-        "toner",
-        "tinta",
-        "cartucho",
-        "bateria",
-        "caja",
-        "paquete",
-        "pieza",
-        "piezas",
-        "servicio",
-        "mantenimiento",
-        "instalacion",
-        "suministro",
-        "equipo",
-        "material",
-    ]
-
-    # No exigimos que tenga señal de producto, pero si la tiene, pasa con más confianza.
-    if any(signal in lower_plain for signal in product_signals):
-        return True
-
-    # Si es una frase larga con letras suficientes, puede ser descripción técnica.
-    if len(words) >= 4 and len(normalized) >= 20:
-        return True
-
-    return False
+    return True
 
 
 def _row_looks_like_header_or_form(row_text: str) -> bool:
@@ -454,73 +432,351 @@ def _row_looks_like_header_or_form(row_text: str) -> bool:
     return False
 
 
-# ===================== EXTRACCIÓN CON OPENAI =====================
+# ============================================================
+# Limpieza de unidad/descripcion
+# ============================================================
 
-_PROMPT_SISTEMA_ITEMS = """
-Eres un extractor experto de partidas de anexos de licitaciones públicas de gobierno en México.
-Tu trabajo es interpretar tablas de licitación con sentido común comercial y devolver solamente productos o servicios reales que se puedan cotizar.
-Te paso filas de una tabla; cada fila trae sus celdas separadas por ' | '.
+def _extract_unit_and_clean_description(desc: str, unidad: Optional[str]) -> Tuple[str, str]:
+    desc = _normalize_text(desc) or ""
+    unidad = _normalize_text(unidad) or ""
 
-REGLAS GENERALES:
+    original_desc = desc
+    joined_plain = _normalize_for_filter(f"{desc} {unidad}")
+
+    unit_priority = [
+        ("paquete", "PAQUETE"),
+        ("paq", "PAQUETE"),
+        ("caja", "CAJA"),
+        ("bolsa", "BOLSA"),
+        ("frasco", "FRASCO"),
+        ("botella", "BOTELLA"),
+        ("rollo", "ROLLO"),
+        ("juego", "JUEGO"),
+        ("kit", "KIT"),
+        ("servicio", "SERVICIO"),
+    ]
+
+    inferred = None
+
+    for token, unit_name in unit_priority:
+        if re.search(rf"\b{re.escape(token)}\b", joined_plain):
+            inferred = unit_name
+            break
+
+    unidad_plain = _normalize_for_filter(unidad)
+
+    if inferred and (not unidad or unidad_plain in ["pieza", "piezas", "pza", "pz", "pzs"]):
+        unidad = inferred
+
+    if not inferred and unidad:
+        unidad_text_plain = _normalize_for_filter(unidad)
+
+        for token, unit_name in unit_priority:
+            if re.search(rf"\b{re.escape(token)}\b", unidad_text_plain):
+                unidad = unit_name
+                break
+
+    def should_remove_parenthetical(match: re.Match) -> str:
+        inside = match.group(1)
+        inside_plain = _normalize_for_filter(inside)
+        has_container = any(
+            re.search(rf"\b{re.escape(token)}\b", inside_plain)
+            for token, _ in unit_priority
+        )
+        has_piece_count = bool(re.search(r"\b\d+\b", inside_plain)) and bool(
+            re.search(r"\b(pieza|piezas|pza|pz|pzs)\b", inside_plain)
+        )
+
+        if has_container or has_piece_count:
+            return ""
+
+        return match.group(0)
+
+    desc = re.sub(r"\(([^)]{1,120})\)", should_remove_parenthetical, desc)
+    desc = _normalize_text(desc) or original_desc
+
+    if not unidad:
+        unidad = "PIEZA"
+
+    return desc, unidad.upper()
+
+
+def _parse_partida_subpartida(value) -> Tuple[Optional[int], Optional[int]]:
+    txt = _normalize_text(value)
+
+    if not txt:
+        return None, None
+
+    if re.match(r"^\d+\.\d+$", txt):
+        a, b = txt.split(".", 1)
+        return int(a), int(b)
+
+    num = _normalize_number(txt)
+
+    if isinstance(num, int):
+        return num, None
+
+    if isinstance(num, float) and num.is_integer():
+        return int(num), None
+
+    return None, None
+
+
+def _detect_unit_from_text(text: str) -> Optional[str]:
+    plain = _normalize_for_filter(text)
+
+    if "paquete" in plain or re.search(r"\bpaq\b", plain):
+        return "PAQUETE"
+
+    if "caja" in plain:
+        return "CAJA"
+
+    if "bolsa" in plain:
+        return "BOLSA"
+
+    if "frasco" in plain:
+        return "FRASCO"
+
+    if "botella" in plain:
+        return "BOTELLA"
+
+    if "rollo" in plain:
+        return "ROLLO"
+
+    if "juego" in plain:
+        return "JUEGO"
+
+    if "servicio" in plain:
+        return "SERVICIO"
+
+    if plain in ["pieza", "piezas", "pza", "pz", "pzs"]:
+        return "PIEZA"
+
+    return None
+
+
+# ============================================================
+# Azure extrae candidatos. OpenAI solo corrige candidatos.
+# ============================================================
+
+def _row_to_azure_candidate(cells: List[str], seq: int) -> Optional[Dict[str, Any]]:
+    non_empty = [_normalize_text(c) or "" for c in cells if (_normalize_text(c) or "")]
+
+    if len(non_empty) < 2:
+        return None
+
+    joined = " | ".join(non_empty)
+
+    if _row_looks_like_header_or_form(joined):
+        return None
+
+    partida = None
+    subpartida = None
+
+    for c in non_empty[:3]:
+        p, s = _parse_partida_subpartida(c)
+
+        if p is not None:
+            partida = p
+            subpartida = s
+            break
+
+    numbers = []
+
+    for index, c in enumerate(non_empty):
+        plain = _normalize_for_filter(c)
+
+        if re.match(r"^\d+\s+de\s+\d+$", plain):
+            continue
+
+        p, _s = _parse_partida_subpartida(c)
+
+        if p is not None and p == partida and index <= 2:
+            continue
+
+        n = _normalize_number(c)
+
+        if n is not None and n > 0:
+            numbers.append(n)
+
+    cantidad = numbers[0] if numbers else None
+    cantidad_minima = None
+    cantidad_maxima = None
+
+    if len(numbers) >= 2:
+        cantidad_minima = numbers[0]
+        cantidad_maxima = numbers[1]
+        cantidad = None
+
+    desc_candidates = []
+
+    for c in non_empty:
+        if not _looks_like_product_description(c):
+            continue
+
+        plain = _normalize_for_filter(c)
+
+        if plain in [
+            "pieza",
+            "piezas",
+            "paquete",
+            "paquetes",
+            "caja",
+            "cajas",
+            "bolsa",
+            "bolsas",
+            "servicio",
+            "servicios",
+        ]:
+            continue
+
+        # Evita que números/cantidades ganen como descripción.
+        if _normalize_number(c) is not None:
+            continue
+
+        desc_candidates.append(c)
+
+    if not desc_candidates:
+        return None
+
+    descripcion = max(desc_candidates, key=len)
+
+    unidad = None
+
+    for c in non_empty:
+        detected = _detect_unit_from_text(c)
+
+        if detected:
+            unidad = detected
+            break
+
+    descripcion, unidad = _extract_unit_and_clean_description(descripcion, unidad)
+
+    cantidad_cotizada = (
+        cantidad_minima
+        if cantidad_minima is not None
+        else (
+            cantidad
+            if cantidad is not None
+            else (
+                cantidad_maxima
+                if cantidad_maxima is not None
+                else 1
+            )
+        )
+    )
+
+    return {
+        "partida": partida if partida is not None else seq,
+        "subpartida": subpartida,
+        "numero": partida if partida is not None else seq,
+        "clave": None,
+        "descripcion": descripcion,
+        "nombre": descripcion,
+        "unidad": unidad or "PIEZA",
+        "cantidad": cantidad,
+        "cantidad_minima": cantidad_minima,
+        "cantidad_maxima": cantidad_maxima,
+        "cantidad_cotizada": cantidad_cotizada,
+        "presentar_muestra": None,
+    }
+
+
+def _extract_candidates_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    tables = raw_analyze_result.get("tables", []) or []
+
+    candidates = []
+    seen = set()
+    seq = 0
+
+    for table_index, table in enumerate(tables, start=1):
+        matrix = _build_table_matrix(table)
+
+        for row in matrix:
+            cells = [(c or "").strip() for c in row]
+
+            if not any(cells):
+                continue
+
+            candidate = _row_to_azure_candidate(cells, seq + 1)
+
+            if not candidate:
+                continue
+
+            key = (
+                str(candidate.get("partida") or ""),
+                str(candidate.get("subpartida") or ""),
+                (candidate.get("descripcion") or "").lower()[:180],
+                str(candidate.get("cantidad") or ""),
+                str(candidate.get("cantidad_minima") or ""),
+                str(candidate.get("cantidad_maxima") or ""),
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            seq += 1
+
+            if not candidate.get("partida"):
+                candidate["partida"] = seq
+                candidate["numero"] = seq
+
+            candidates.append(candidate)
+
+    return candidates
+
+
+_PROMPT_CORRECT_ITEMS = """
+Eres un revisor de partidas ya extraídas por Azure Document Intelligence.
+IMPORTANTE: Azure ya hizo la extracción. Tú NO debes buscar partidas nuevas en el PDF ni inventar renglones.
+Tu tarea es únicamente corregir, limpiar y validar los candidatos que ya vienen en JSON.
+
+REGLAS:
 - Devuelve SOLO JSON válido.
 - No uses markdown.
-- No inventes productos.
-- Omite encabezados, pies de página, fechas, horarios, domicilios, firmas, notas, instrucciones, subtotales, totales y números de página.
-- Si una fila no describe un bien o servicio concreto, omítela.
-- No devuelvas como producto textos como FECHA, HORARIO, DOMICILIO, LUGAR, NOMBRE, FIRMA, 1 de 16, Hoja 3, Descripción, Cantidad, Unidad, Precio, etc.
-
-PARTIDA Y SUBPARTIDA:
-- Si la partida viene como 1, devuelve partida=1 y subpartida=null.
-- Si viene como 1.1, devuelve partida=1 y subpartida=1.
-- Si viene como 2.15, devuelve partida=2 y subpartida=15.
-- Si hay columna de partida y columna de subpartida, respétalas.
-- No confundas cantidad con partida.
+- No inventes partidas.
+- No agregues partidas nuevas.
+- No elimines productos reales aunque sean simples o de una sola palabra, por ejemplo:
+  Aguja, Aguja para alacrán, Servilletas, Borrador para pizarrón, Etiquetas para CD, Liga de hule, Marcatextos, Clips, Grapas.
+- Solo elimina renglones que claramente NO son producto/servicio:
+  FECHA, HORARIO, DOMICILIO, LUGAR, NOMBRE, FIRMA, 1 de 16, Hoja 3, Página 5,
+  encabezados como Descripción, Cantidad, Unidad, Precio, Subtotal, Total, IVA,
+  notas, instrucciones, direcciones, dependencias, firmas o cláusulas.
 
 DESCRIPCIÓN:
-- descripcion debe ser SOLO el producto o servicio real solicitado.
-- No pongas en descripcion la unidad, cantidad, clave, precio ni encabezados.
-- Si la descripción trae una presentación entre paréntesis, sepárala cuando sea unidad/presentación.
-- Ejemplo: 'Arillo metálico doble p engargolar 3/8" (caja/paquete 90 piezas)' debe quedar:
-  descripcion='Arillo metálico doble p engargolar 3/8"'
-  unidad='PAQUETE'
-- Ejemplo: 'Marcador permanente negro (caja con 12 piezas)' debe quedar:
-  descripcion='Marcador permanente negro'
-  unidad='CAJA'
-- Ejemplo: 'Bolígrafo punto mediano (paquete con 10 piezas)' debe quedar:
-  descripcion='Bolígrafo punto mediano'
-  unidad='PAQUETE'
-- Si la descripción dice algo como 'Block con 100 notas autoadheribles' y eso es el nombre normal del producto, conserva esa frase en descripcion.
+- Corrige errores de OCR u ortografía leves.
+- descripcion debe ser solo el producto o servicio.
+- Si la descripción trae presentación entre paréntesis, quítala de descripcion y úsala para unidad.
+- Ejemplo:
+  descripcion entrada: Arillo metálico doble p engargolar 3/8" (caja/paquete 90 piezas)
+  descripcion salida: Arillo metálico doble p engargolar 3/8"
+  unidad salida: PAQUETE
+- No cambies el significado del producto.
 
-UNIDAD DE MEDIDA:
-- Usa sentido común comercial.
-- unidad debe ser la unidad comercial SIMPLE con la que se compra/cotiza: PAQUETE, CAJA, BOLSA, FRASCO, BOTELLA, ROLLO, JUEGO, KIT, SERVICIO, PIEZA, etc.
-- Si el texto dice 'caja/paquete 90 piezas', usa unidad='PAQUETE' o unidad='CAJA', pero NUNCA unidad='PIEZA'.
-- Si el texto dice 'paquete con 100 piezas', usa unidad='PAQUETE', no 'PIEZA'.
-- Si el texto dice 'caja con 12 piezas', usa unidad='CAJA', no 'PIEZA'.
-- Si el texto dice 'bolsa con 50 piezas', usa unidad='BOLSA', no 'PIEZA'.
-- Si el texto dice solo 'pieza' y no hay otra presentación, usa unidad='PIEZA'.
-- No metas la presentación completa en unidad; no pongas 'PAQUETE CON 100 PIEZAS'. Pon solamente 'PAQUETE'.
-- No dejes la presentación dentro de descripcion cuando sea claramente unidad/presentación.
-- El número de piezas de una presentación no es la cantidad solicitada. Ejemplo: cantidad=10 y unidad='PAQUETE' con presentación de 90 piezas significa que solicitan 10 paquetes.
+UNIDAD:
+- Corrige la unidad si Azure la puso mal.
+- Si el texto dice caja/paquete, paquete con piezas, caja con piezas o bolsa con piezas, NO uses PIEZA.
+- Usa unidad simple comercial: PAQUETE, CAJA, BOLSA, FRASCO, BOTELLA, ROLLO, JUEGO, KIT, SERVICIO, PIEZA.
+- Si dice caja/paquete 90 piezas, usa PAQUETE.
+- Si dice paquete con 100 piezas, usa PAQUETE.
+- Si dice caja con 12 piezas, usa CAJA.
+- Si dice bolsa con 50 piezas, usa BOLSA.
+- Si solo dice pieza y no hay otra presentación, usa PIEZA.
 
-CANTIDADES:
-- cantidad_minima debe ser la cantidad mínima si aparece.
-- cantidad_maxima debe ser la cantidad máxima si aparece.
-- cantidad debe ser la cantidad única si solo hay una cantidad.
-- cantidad_cotizada debe seguir esta regla obligatoria:
-  1. Si existe cantidad_minima, cantidad_cotizada = cantidad_minima.
-  2. Si no existe cantidad_minima pero existe cantidad, cantidad_cotizada = cantidad.
-  3. Si no existe cantidad ni cantidad_minima pero existe cantidad_maxima, cantidad_cotizada = cantidad_maxima.
-  4. Si no existe ninguna cantidad, cantidad_cotizada = 1.
-- Nunca uses cantidad_maxima como cantidad_cotizada si también existe cantidad_minima.
-- No confundas números de partida, claves, páginas o presentaciones con cantidad solicitada.
-- En 'PAQUETE CON 100 PIEZAS', el 100 pertenece a la presentación, no necesariamente a cantidad solicitada.
+CANTIDAD:
+- No confundas piezas de presentación con cantidad solicitada.
+- Si existe cantidad_minima, cantidad_cotizada debe ser cantidad_minima.
+- Si no existe cantidad_minima pero existe cantidad, cantidad_cotizada debe ser cantidad.
+- Si no existe cantidad ni cantidad_minima pero existe cantidad_maxima, cantidad_cotizada debe ser cantidad_maxima.
+- Si no existe ninguna cantidad, cantidad_cotizada debe ser 1.
 
-CLAVE:
-- clave es código, clave presupuestal, SKU, clave CABMS o código de partida si aparece.
-- Si no existe, usa null.
+PARTIDA Y SUBPARTIDA:
+- Respeta partida y subpartida de Azure.
+- Si partida viene como 1.1, salida partida=1 y subpartida=1.
+- Si viene 2.15, salida partida=2 y subpartida=15.
 
-Devuelve exactamente este JSON:
+Devuelve exactamente:
 {
   "items": [
     {
@@ -540,137 +796,23 @@ Devuelve exactamente este JSON:
 """
 
 
-def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
-    bloque = "\n".join(rows)
-
+def _openai_correct_items_chunk(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     try:
-        if not OPENAI_API_KEY:
-            raise Exception("Falta OPENAI_API_KEY en .env")
+        data = _responses_json(
+            _PROMPT_CORRECT_ITEMS,
+            "Corrige y valida estos candidatos extraídos por Azure. "
+            "No inventes ni agregues otros. JSON:\n\n"
+            + json.dumps({"items": items}, ensure_ascii=False),
+        )
 
-        url = f"{OPENAI_BASE_URL}/responses"
+        corrected = data.get("items") or []
 
-        payload = {
-            "model": OPENAI_MODEL,
-            "input": [
-                {
-                    "role": "system",
-                    "content": _PROMPT_SISTEMA_ITEMS,
-                },
-                {
-                    "role": "user",
-                    "content": "Filas de la tabla:\n\n" + bloque,
-                },
-            ],
-            "text": {
-                "format": {
-                    "type": "json_object",
-                }
-            },
-        }
-
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-
-        resp = requests.post(url, headers=headers, json=payload, timeout=180)
-
-        if not resp.ok:
-            raise Exception(f"OpenAI Responses API error: {resp.status_code} - {resp.text}")
-
-        response_data = resp.json()
-
-        if isinstance(response_data.get("output_text"), str) and response_data["output_text"].strip():
-            raw_text = response_data["output_text"]
-        else:
-            parts = []
-
-            for output in response_data.get("output", []) or []:
-                for content in output.get("content", []) or []:
-                    if isinstance(content, dict):
-                        if content.get("type") in ["output_text", "text"] and content.get("text"):
-                            parts.append(content.get("text"))
-                        elif content.get("text"):
-                            parts.append(content.get("text"))
-
-            raw_text = "\n".join(parts).strip()
-
-        data = json.loads(_extract_json_candidate(raw_text))
-        items = data.get("items") or []
-
-        return items if isinstance(items, list) else []
+        return corrected if isinstance(corrected, list) else []
 
     except Exception as e:
-        # IMPORTANTE: stderr, nunca stdout, porque Laravel puede leer stdout como JSON.
-        _log(f"[extract_items] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}")
+        _log(f"[correct_items] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}")
         return []
 
-
-def _extract_unit_and_clean_description(desc: str, unidad: Optional[str]) -> tuple[str, str]:
-    """
-    Usa sentido común mínimo como red de seguridad si la IA deja la presentación
-    dentro de la descripción o devuelve PIEZA cuando realmente era CAJA/PAQUETE/etc.
-    """
-    desc = _normalize_text(desc) or ""
-    unidad = _normalize_text(unidad) or ""
-
-    original_desc = desc
-    joined = f"{desc} {unidad}".lower()
-    joined_plain = _normalize_for_filter(joined)
-
-    # Preferencia cuando aparecen varias palabras. En "caja/paquete 90 piezas"
-    # normalmente cotizas por paquete/presentación, y sobre todo no por PIEZA.
-    unit_priority = [
-        ("paquete", "PAQUETE"),
-        ("paq", "PAQUETE"),
-        ("caja", "CAJA"),
-        ("bolsa", "BOLSA"),
-        ("frasco", "FRASCO"),
-        ("botella", "BOTELLA"),
-        ("rollo", "ROLLO"),
-        ("juego", "JUEGO"),
-        ("kit", "KIT"),
-        ("servicio", "SERVICIO"),
-    ]
-
-    inferred = None
-    for token, unit_name in unit_priority:
-        if re.search(rf"\b{re.escape(token)}\b", joined_plain):
-            inferred = unit_name
-            break
-
-    # Si la unidad venía vacía o era PIEZA pero hay presentación en el texto,
-    # reemplazamos por la unidad comercial inferida.
-    unidad_plain = _normalize_for_filter(unidad)
-    if inferred and (not unidad or unidad_plain in ["pieza", "piezas", "pza", "pz", "pzs"]):
-        unidad = inferred
-
-    # Si la unidad venía compuesta, simplificarla: "PAQUETE CON 100 PIEZAS" -> "PAQUETE"
-    if not inferred and unidad:
-        unidad_text_plain = _normalize_for_filter(unidad)
-        for token, unit_name in unit_priority:
-            if re.search(rf"\b{re.escape(token)}\b", unidad_text_plain):
-                unidad = unit_name
-                break
-
-    # Quitar paréntesis de presentación de la descripción:
-    # "(caja/paquete 90 piezas)", "(caja con 12 piezas)", "(paquete c/10 piezas)".
-    def should_remove_parenthetical(match: re.Match) -> str:
-        inside = match.group(1)
-        inside_plain = _normalize_for_filter(inside)
-        has_container = any(re.search(rf"\b{re.escape(token)}\b", inside_plain) for token, _ in unit_priority)
-        has_piece_count = bool(re.search(r"\b\d+\b", inside_plain)) and bool(re.search(r"\b(pieza|piezas|pza|pz|pzs)\b", inside_plain))
-        if has_container or has_piece_count:
-            return ""
-        return match.group(0)
-
-    desc = re.sub(r"\(([^)]{1,120})\)", should_remove_parenthetical, desc)
-    desc = _normalize_text(desc) or original_desc
-
-    if not unidad:
-        unidad = "PIEZA"
-
-    return desc, unidad.upper()
 
 def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
@@ -713,7 +855,12 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
             else:
                 cantidad_cotizada = 1
 
-        unidad = _normalize_text(it.get("unidad")) or "PIEZA"
+        unidad = _normalize_text(
+            it.get("unidad")
+            or it.get("unit")
+            or it.get("unidad_solicitada")
+        ) or "PIEZA"
+
         desc, unidad = _extract_unit_and_clean_description(desc, unidad)
 
         key = (
@@ -733,9 +880,11 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
 
         partida = _normalize_number(it.get("partida"))
 
-        muestra = _normalize_text(it.get("muestra"))
+        muestra = _normalize_text(it.get("muestra") or it.get("presentar_muestra"))
+
         if muestra:
             m = muestra.lower()
+
             if m in ["si", "sí", "x", "aplica"]:
                 muestra = "Si"
             elif m in ["no", "n/a", "na"]:
@@ -762,194 +911,55 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Flujo correcto:
+    1. Azure Document Intelligence extrae tablas.
+    2. Parser local convierte tablas de Azure en candidatos.
+    3. OpenAI solo corrige OCR/unidad/ortografía y elimina basura obvia.
+    """
     tables = raw_analyze_result.get("tables", []) or []
-    api_key = os.getenv("OPENAI_API_KEY", "")
 
     _log(f"[extract_items] Tablas detectadas por Azure: {len(tables)}")
+    _log("[extract_items] Azure/parser local extraen candidatos; OpenAI solo corrige.")
 
-    crudos_all: List[Dict[str, Any]] = []
+    azure_candidates = _extract_candidates_from_azure_tables(raw_analyze_result)
 
-    if api_key and tables:
-        for table_index, table in enumerate(tables, start=1):
-            rows = _matrix_to_rows(_build_table_matrix(table))
+    _log(f"[extract_items] Candidatos extraídos desde Azure/parser local: {len(azure_candidates)}")
 
-            if len(rows) < 2:
-                continue
-
-            useful_rows = []
-
-            for row in rows:
-                if _row_looks_like_header_or_form(row):
-                    continue
-
-                # No quitamos filas cortas aquí porque OpenAI puede necesitar contexto,
-                # pero sí quitamos basura obvia de página.
-                row_plain = _normalize_for_filter(row)
-                if re.match(r"^\d+\s+de\s+\d+$", row_plain):
-                    continue
-
-                useful_rows.append(row)
-
-            if not useful_rows:
-                continue
-
-            _log(f"[extract_items] Tabla {table_index}: {len(useful_rows)} filas útiles candidatas")
-
-            # Extrae por lotes de 45 filas.
-            for i in range(0, len(useful_rows), 45):
-                chunk = useful_rows[i:i + 45]
-                crudos_all.extend(_openai_extract_chunk(chunk))
-
-    sanitized = _sanitize_extracted_items(crudos_all)
-
-    if sanitized:
-        _log(f"[extract_items] Items válidos extraídos con OpenAI: {len(sanitized)}")
+    if not azure_candidates:
         return {
-            "items_count": len(sanitized),
-            "items": sanitized,
+            "items_count": 0,
+            "items": [],
         }
 
-    # ===================== FALLBACK SEGURO SIN OPENAI =====================
-    # Este fallback ahora es conservador. Es mejor devolver pocos items correctos
-    # que meter FECHA, 1 de 16, DOMICILIO, etc.
+    corrected_all: List[Dict[str, Any]] = []
 
-    _log("[extract_items] OpenAI no devolvió items válidos. Entrando a fallback seguro.")
+    if OPENAI_API_KEY:
+        chunk_size = max(1, OPENAI_CORRECT_CHUNK_ITEMS)
+        _log(f"[correct_items] Corrigiendo candidatos con OpenAI en bloques de {chunk_size}")
 
-    rows_text: List[str] = []
+        for i in range(0, len(azure_candidates), chunk_size):
+            chunk = azure_candidates[i:i + chunk_size]
+            _log(f"[correct_items] Bloque {int(i / chunk_size) + 1}: {len(chunk)} items")
+            corrected = _openai_correct_items_chunk(chunk)
 
-    for table in tables:
-        rows_text.extend(_matrix_to_rows(_build_table_matrix(table)))
+            if corrected:
+                corrected_all.extend(corrected)
+            else:
+                corrected_all.extend(chunk)
+    else:
+        corrected_all = azure_candidates
 
-    if not rows_text:
-        content = raw_analyze_result.get("content", "") or ""
-        rows_text = [line.strip() for line in content.splitlines() if line.strip()]
+    sanitized = _sanitize_extracted_items(corrected_all)
 
-    fallback = []
-    seq = 0
-    seen = set()
-
-    unit_words = [
-        "PIEZA",
-        "PIEZAS",
-        "PZA",
-        "PZ",
-        "PZS",
-        "CAJA",
-        "CAJAS",
-        "PAQUETE",
-        "PAQUETES",
-        "PAQ",
-        "SERVICIO",
-        "SERVICIOS",
-        "KG",
-        "KGS",
-        "GRAMO",
-        "GRAMOS",
-        "LT",
-        "LTS",
-        "LITRO",
-        "LITROS",
-        "ML",
-        "METRO",
-        "METROS",
-        "M",
-        "CM",
-        "MM",
-        "ROLLO",
-        "ROLLOS",
-        "BOLSA",
-        "BOLSAS",
-        "BOTELLA",
-        "BOTELLAS",
-    ]
-
-    for line in rows_text:
-        if _row_looks_like_header_or_form(line):
-            continue
-
-        cells = [c.strip() for c in line.split("|")]
-        non_empty = [c for c in cells if c]
-
-        if len(non_empty) < 2:
-            continue
-
-        candidate_descriptions = []
-
-        for c in non_empty:
-            if _looks_like_product_description(c):
-                candidate_descriptions.append(c)
-
-        if not candidate_descriptions:
-            continue
-
-        # Elegimos la celda descriptiva más larga.
-        desc = max(candidate_descriptions, key=len)
-        desc = _normalize_text(desc)
-
-        if not desc or not _looks_like_product_description(desc):
-            continue
-
-        desc_key = desc.lower()[:180]
-        if desc_key in seen:
-            continue
-
-        seen.add(desc_key)
-
-        cantidad = None
-        unidad = None
-
-        for c in non_empty:
-            clean = c.strip()
-            clean_plain = _normalize_for_filter(clean)
-
-            if re.match(r"^\d+\s+de\s+\d+$", clean_plain):
-                continue
-
-            if clean.upper() in unit_words:
-                unidad = clean.upper()
-                continue
-
-            # Si la celda es un número pequeño y está antes de la descripción,
-            # normalmente es número de partida, no cantidad.
-            num = _normalize_number(clean)
-            if num is not None and num > 0:
-                # Evita tomar 1,2,3... como cantidad cuando parecen índice.
-                if num <= 300:
-                    cantidad = num
-                else:
-                    cantidad = num
-
-        desc, unidad = _extract_unit_and_clean_description(desc, unidad)
-
-        seq += 1
-
-        fallback.append({
-            "partida": seq,
-            "subpartida": None,
-            "numero": seq,
-            "clave": None,
-            "descripcion": desc,
-            "nombre": desc,
-            "unidad": unidad or "PIEZA",
-            "cantidad": cantidad,
-            "cantidad_minima": None,
-            "cantidad_maxima": None,
-            "cantidad_cotizada": cantidad if cantidad is not None else 1,
-            "presentar_muestra": None,
-        })
-
-    _log(f"[extract_items] Items válidos extraídos con fallback: {len(fallback)}")
+    _log(f"[extract_items] Items finales después de corrección/sanitizado: {len(sanitized)}")
 
     return {
-        "items_count": len(fallback),
-        "items": fallback,
+        "items_count": len(sanitized),
+        "items": sanitized,
     }
 
 
 def debug_hash_bytes(file_bytes: bytes, label: str = "PDF") -> None:
-    """
-    Úsalo desde el script que llama a Azure para confirmar si realmente
-    estás mandando un PDF nuevo o el mismo archivo anterior.
-    """
     _log(f"[{label}] sha256: {hashlib.sha256(file_bytes).hexdigest()}")
     _log(f"[{label}] size bytes: {len(file_bytes)}")
