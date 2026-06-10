@@ -403,140 +403,83 @@ def _row_looks_like_header_or_form(row_text: str) -> bool:
 
 # ===================== EXTRACCIÓN CON OPENAI =====================
 
-_PROMPT_SISTEMA_ITEMS = (
-    "Eres un extractor experto de partidas de anexos de licitaciones públicas de gobierno en México. "
-    "Tu trabajo es interpretar tablas de licitación con sentido común comercial y devolver solamente productos o servicios reales que se puedan cotizar. "
-    "Te paso filas de una tabla; cada fila trae sus celdas separadas por ' | '.
+_PROMPT_SISTEMA_ITEMS = """
+Eres un extractor experto de partidas de anexos de licitaciones públicas de gobierno en México.
+Tu trabajo es interpretar tablas de licitación con sentido común comercial y devolver solamente productos o servicios reales que se puedan cotizar.
+Te paso filas de una tabla; cada fila trae sus celdas separadas por ' | '.
 
-"
+REGLAS GENERALES:
+- Devuelve SOLO JSON válido.
+- No uses markdown.
+- No inventes productos.
+- Omite encabezados, pies de página, fechas, horarios, domicilios, firmas, notas, instrucciones, subtotales, totales y números de página.
+- Si una fila no describe un bien o servicio concreto, omítela.
+- No devuelvas como producto textos como FECHA, HORARIO, DOMICILIO, LUGAR, NOMBRE, FIRMA, 1 de 16, Hoja 3, Descripción, Cantidad, Unidad, Precio, etc.
 
-    "REGLAS GENERALES:
-"
-    "- Devuelve SOLO JSON válido.
-"
-    "- No uses markdown.
-"
-    "- No inventes productos.
-"
-    "- Omite encabezados, pies de página, fechas, horarios, domicilios, firmas, notas, instrucciones, subtotales, totales y números de página.
-"
-    "- Si una fila no describe un bien o servicio concreto, omítela.
-"
-    "- No devuelvas como producto textos como FECHA, HORARIO, DOMICILIO, LUGAR, NOMBRE, FIRMA, 1 de 16, Hoja 3, Descripción, Cantidad, Unidad, Precio, etc.
+PARTIDA Y SUBPARTIDA:
+- Si la partida viene como 1, devuelve partida=1 y subpartida=null.
+- Si viene como 1.1, devuelve partida=1 y subpartida=1.
+- Si viene como 2.15, devuelve partida=2 y subpartida=15.
+- Si hay columna de partida y columna de subpartida, respétalas.
+- No confundas cantidad con partida.
 
-"
+DESCRIPCIÓN:
+- descripcion debe ser el producto o servicio real solicitado.
+- No pongas en descripcion la unidad, cantidad, clave, precio ni encabezados.
+- Si la descripción trae especificaciones técnicas, consérvalas.
+- Si la descripción dice algo como 'Block con 100 notas autoadheribles', esa frase es descripción, no unidad.
 
-    "PARTIDA Y SUBPARTIDA:
-"
-    "- Si la partida viene como 1, devuelve partida=1 y subpartida=null.
-"
-    "- Si viene como 1.1, devuelve partida=1 y subpartida=1.
-"
-    "- Si viene como 2.15, devuelve partida=2 y subpartida=15.
-"
-    "- Si hay columna de partida y columna de subpartida, respétalas.
-"
-    "- No confundas cantidad con partida.
+UNIDAD DE MEDIDA:
+- Usa sentido común comercial.
+- unidad debe ser la presentación solicitada EXACTA o la unidad comercial más fiel a la tabla.
+- Si la tabla dice 'PAQUETE CON 100 PIEZAS', unidad debe ser 'PAQUETE CON 100 PIEZAS'.
+- Si la tabla dice 'CAJA CON 12 PIEZAS', unidad debe ser 'CAJA CON 12 PIEZAS'.
+- Si la tabla dice 'BOLSA CON 50 PIEZAS', unidad debe ser 'BOLSA CON 50 PIEZAS'.
+- Si dice 'PAQUETE', unidad debe ser 'PAQUETE'.
+- Si dice 'PIEZA', unidad debe ser 'PIEZA'.
+- Si dice 'SERVICIO', unidad debe ser 'SERVICIO'.
+- No reduzcas presentaciones compuestas a PIEZA.
+- No cambies PAQUETE CON 100 PIEZAS por PIEZA.
+- No cambies CAJA CON 12 PIEZAS por PIEZA.
+- No cambies BOLSA CON 50 PIEZAS por PIEZA.
+- Si una celda combina cantidad y unidad, interpreta correctamente cuál número es cantidad solicitada y cuál pertenece a la presentación.
+- Ejemplo: cantidad solicitada=10 y unidad='PAQUETE CON 100 PIEZAS' significa que solicitan 10 paquetes, no 100 piezas.
 
-"
+CANTIDADES:
+- cantidad_minima debe ser la cantidad mínima si aparece.
+- cantidad_maxima debe ser la cantidad máxima si aparece.
+- cantidad debe ser la cantidad única si solo hay una cantidad.
+- cantidad_cotizada debe seguir esta regla obligatoria:
+  1. Si existe cantidad_minima, cantidad_cotizada = cantidad_minima.
+  2. Si no existe cantidad_minima pero existe cantidad, cantidad_cotizada = cantidad.
+  3. Si no existe cantidad ni cantidad_minima pero existe cantidad_maxima, cantidad_cotizada = cantidad_maxima.
+  4. Si no existe ninguna cantidad, cantidad_cotizada = 1.
+- Nunca uses cantidad_maxima como cantidad_cotizada si también existe cantidad_minima.
+- No confundas números de partida, claves, páginas o presentaciones con cantidad solicitada.
+- En 'PAQUETE CON 100 PIEZAS', el 100 pertenece a la unidad/presentación, no necesariamente a cantidad solicitada.
 
-    "DESCRIPCIÓN:
-"
-    "- descripcion debe ser el producto o servicio real solicitado.
-"
-    "- No pongas en descripcion la unidad, cantidad, clave, precio ni encabezados.
-"
-    "- Si la descripción trae especificaciones técnicas, consérvalas.
-"
-    "- Si la descripción dice algo como 'Block con 100 notas autoadheribles', esa frase es descripción, no unidad.
+CLAVE:
+- clave es código, clave presupuestal, SKU, clave CABMS o código de partida si aparece.
+- Si no existe, usa null.
 
-"
-
-    "UNIDAD DE MEDIDA:
-"
-    "- Usa sentido común comercial.
-"
-    "- unidad debe ser la presentación solicitada EXACTA o la unidad comercial más fiel a la tabla.
-"
-    "- Si la tabla dice 'PAQUETE CON 100 PIEZAS', unidad debe ser 'PAQUETE CON 100 PIEZAS'.
-"
-    "- Si la tabla dice 'CAJA CON 12 PIEZAS', unidad debe ser 'CAJA CON 12 PIEZAS'.
-"
-    "- Si la tabla dice 'BOLSA CON 50 PIEZAS', unidad debe ser 'BOLSA CON 50 PIEZAS'.
-"
-    "- Si dice 'PAQUETE', unidad debe ser 'PAQUETE'.
-"
-    "- Si dice 'PIEZA', unidad debe ser 'PIEZA'.
-"
-    "- Si dice 'SERVICIO', unidad debe ser 'SERVICIO'.
-"
-    "- No reduzcas presentaciones compuestas a PIEZA.
-"
-    "- No cambies PAQUETE CON 100 PIEZAS por PIEZA.
-"
-    "- No cambies CAJA CON 12 PIEZAS por PIEZA.
-"
-    "- No cambies BOLSA CON 50 PIEZAS por PIEZA.
-"
-    "- Si una celda combina cantidad y unidad, interpreta correctamente cuál número es cantidad solicitada y cuál pertenece a la presentación.
-"
-    "- Ejemplo: cantidad solicitada=10 y unidad='PAQUETE CON 100 PIEZAS' significa que solicitan 10 paquetes, no 100 piezas.
-
-"
-
-    "CANTIDADES:
-"
-    "- cantidad_minima debe ser la cantidad mínima si aparece.
-"
-    "- cantidad_maxima debe ser la cantidad máxima si aparece.
-"
-    "- cantidad debe ser la cantidad única si solo hay una cantidad.
-"
-    "- cantidad_cotizada debe seguir esta regla obligatoria:
-"
-    "  1. Si existe cantidad_minima, cantidad_cotizada = cantidad_minima.
-"
-    "  2. Si no existe cantidad_minima pero existe cantidad, cantidad_cotizada = cantidad.
-"
-    "  3. Si no existe cantidad ni cantidad_minima pero existe cantidad_maxima, cantidad_cotizada = cantidad_maxima.
-"
-    "  4. Si no existe ninguna cantidad, cantidad_cotizada = 1.
-"
-    "- Nunca uses cantidad_maxima como cantidad_cotizada si también existe cantidad_minima.
-"
-    "- No confundas números de partida, claves, páginas o presentaciones con cantidad solicitada.
-"
-    "- En 'PAQUETE CON 100 PIEZAS', el 100 pertenece a la unidad/presentación, no necesariamente a cantidad solicitada.
-
-"
-
-    "CLAVE:
-"
-    "- clave es código, clave presupuestal, SKU, clave CABMS o código de partida si aparece.
-"
-    "- Si no existe, usa null.
-
-"
-
-    "Devuelve exactamente este JSON:
-"
-    "{"
-    "\"items\":["
-    "{"
-    "\"partida\":null,"
-    "\"subpartida\":null,"
-    "\"clave\":null,"
-    "\"descripcion\":\"\","
-    "\"unidad\":\"\","
-    "\"cantidad\":null,"
-    "\"cantidad_minima\":null,"
-    "\"cantidad_maxima\":null,"
-    "\"cantidad_cotizada\":null,"
-    "\"muestra\":null"
-    "}"
-    "]"
-    "}"
-)
+Devuelve exactamente este JSON:
+{
+  "items": [
+    {
+      "partida": null,
+      "subpartida": null,
+      "clave": null,
+      "descripcion": "",
+      "unidad": "",
+      "cantidad": null,
+      "cantidad_minima": null,
+      "cantidad_maxima": null,
+      "cantidad_cotizada": null,
+      "muestra": null
+    }
+  ]
+}
+"""
 
 
 def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
@@ -604,7 +547,6 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
             else:
                 cantidad_cotizada = 1
 
-        # La unidad debe venir decidida por la IA. No la reduzcas a "PIEZA" si viene compuesta.
         unidad = _normalize_text(it.get("unidad")) or "PIEZA"
 
         key = (
