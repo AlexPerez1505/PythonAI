@@ -2,13 +2,14 @@ import os
 import sys
 import time
 from io import BytesIO
+from pathlib import Path
 from typing import Dict, Any, List
 
 import requests
 from dotenv import load_dotenv
 from pypdf import PdfReader, PdfWriter
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=True)
 
 AZURE_ENDPOINT = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").rstrip("/")
 AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
