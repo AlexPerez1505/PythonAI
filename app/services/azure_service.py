@@ -10,6 +10,8 @@ import requests
 from dotenv import load_dotenv
 from pypdf import PdfReader, PdfWriter
 
+from app.services.progress import write_progress
+
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=True)
 
 AZURE_ENDPOINT = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").rstrip("/")
@@ -53,6 +55,8 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
     _log(f"[Azure] PDF size bytes: {file_size}")
     _log(f"[Azure] PDF sha256: {file_hash}")
 
+    write_progress(15, "Enviando PDF a Azure", f"{file_size // 1024} KB")
+
     url = f"{AZURE_ENDPOINT}/documentintelligence/documentModels/{model}:analyze?api-version={AZURE_API_VERSION}"
 
     headers = {
@@ -92,6 +96,7 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         status = data.get("status")
 
         _log(f"[Azure] Estado actual: {status}")
+        write_progress(25, "Azure está leyendo el documento", f"estado: {status}")
 
         if status in ["notStarted", "running"]:
             time.sleep(2)
@@ -109,6 +114,8 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         _log(f"[Azure] Páginas detectadas: {len(pages)}")
         _log(f"[Azure] Tablas detectadas: {len(tables)}")
         _log(f"[Azure] Caracteres extraídos: {len(content)}")
+
+        write_progress(40, "Azure terminó la lectura", f"{len(tables)} tablas, {len(pages)} páginas")
 
         return data
 
@@ -129,7 +136,6 @@ def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> List[bytes]:
         end = min(start + pages_per_chunk, total_pages)
 
         writer = PdfWriter()
-
         for i in range(start, end):
             writer.add_page(reader.pages[i])
 
@@ -139,39 +145,28 @@ def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> List[bytes]:
         chunk_bytes = output.getvalue()
         chunks.append(chunk_bytes)
 
-        _log(
-            f"[Split] Chunk creado páginas {start + 1}-{end} | "
-            f"bytes={len(chunk_bytes)} | sha256={_sha256(chunk_bytes)}"
-        )
+        _log(f"[Split] Chunk creado páginas {start + 1}-{end} | bytes={len(chunk_bytes)} | sha256={_sha256(chunk_bytes)}")
 
     return chunks
 
 
 def _offset_spans(spans: List[Dict[str, Any]], content_offset: int) -> List[Dict[str, Any]]:
     new_spans = []
-
     for span in spans or []:
         span_copy = dict(span)
-
         if "offset" in span_copy and isinstance(span_copy["offset"], int):
             span_copy["offset"] = content_offset + span_copy["offset"]
-
         new_spans.append(span_copy)
-
     return new_spans
 
 
 def _offset_page_number_in_regions(regions: List[Dict[str, Any]], page_offset: int) -> List[Dict[str, Any]]:
     new_regions = []
-
     for region in regions or []:
         region_copy = dict(region)
-
         if "pageNumber" in region_copy and isinstance(region_copy["pageNumber"], int):
             region_copy["pageNumber"] = page_offset + region_copy["pageNumber"]
-
         new_regions.append(region_copy)
-
     return new_regions
 
 
@@ -241,7 +236,6 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
                 table_copy["spans"] = _offset_spans(table_copy.get("spans", []), current_content_offset)
 
             new_cells = []
-
             for cell in table_copy.get("cells", []) or []:
                 cell_copy = dict(cell)
 
@@ -262,7 +256,6 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         current_page_offset += len(pages)
 
         if content:
-            # Se suma +2 porque al final unimos con "\n\n"
             current_content_offset += len(content) + 2
 
     merged_content = "\n\n".join(merged_content_parts)
@@ -271,6 +264,8 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     _log(f"[Merge] Total páginas: {len(merged_pages)}")
     _log(f"[Merge] Total tablas: {len(merged_tables)}")
     _log(f"[Merge] Total caracteres: {len(merged_content)}")
+
+    write_progress(40, "Azure terminó la lectura", f"{len(merged_tables)} tablas, {len(merged_pages)} páginas")
 
     return {
         "status": "succeeded",
@@ -282,11 +277,7 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def analyze_pdf_with_auto_split(
-    file_bytes: bytes,
-    model: str = "prebuilt-layout",
-    pages_per_chunk: int = 5,
-) -> Dict[str, Any]:
+def analyze_pdf_with_auto_split(file_bytes: bytes, model: str = "prebuilt-layout", pages_per_chunk: int = 5) -> Dict[str, Any]:
     if not file_bytes:
         raise Exception("El PDF está vacío o no se recibieron bytes.")
 
@@ -307,18 +298,16 @@ def analyze_pdf_with_auto_split(
 
     except Exception as e:
         error_message = str(e)
-
         _log(f"[Azure] Error analizando PDF completo: {error_message}")
-
         if not _is_size_error(error_message):
             raise
-
         _log("[Azure] Azure rechazó el PDF completo por tamaño. Se intentará dividir.")
 
     current_chunk_size = pages_per_chunk
 
     while current_chunk_size >= 1:
         _log(f"[Split] Intentando dividir PDF en bloques de {current_chunk_size} página(s)...")
+        write_progress(20, "Dividiendo el PDF", f"bloques de {current_chunk_size} página(s)")
 
         chunks = split_pdf_bytes(file_bytes, pages_per_chunk=current_chunk_size)
 
@@ -327,12 +316,11 @@ def analyze_pdf_with_auto_split(
 
         for index, chunk_bytes in enumerate(chunks, start=1):
             try:
-                _log(
-                    f"[Azure] Procesando chunk {index}/{len(chunks)} "
-                    f"con máximo {current_chunk_size} página(s)..."
-                )
+                _log(f"[Azure] Procesando chunk {index}/{len(chunks)} con máximo {current_chunk_size} página(s)...")
                 _log(f"[Azure] Chunk {index} size bytes: {len(chunk_bytes)}")
                 _log(f"[Azure] Chunk {index} sha256: {_sha256(chunk_bytes)}")
+
+                write_progress(20 + int(20 * index / max(len(chunks), 1)), "Azure leyendo el PDF", f"bloque {index} de {len(chunks)}")
 
                 partial_result = _analyze_single_pdf_bytes(chunk_bytes, model=model)
                 partial_results.append(partial_result)
@@ -341,7 +329,6 @@ def analyze_pdf_with_auto_split(
 
             except Exception as e:
                 error_message = str(e)
-
                 _log(f"[Azure] Error procesando chunk {index}/{len(chunks)}: {error_message}")
 
                 if _is_size_error(error_message) and current_chunk_size > 1:
@@ -357,6 +344,4 @@ def analyze_pdf_with_auto_split(
 
         current_chunk_size = current_chunk_size // 2
 
-    raise Exception(
-        "No se pudo procesar el PDF: incluso dividido en bloques mínimos Azure lo rechazó por tamaño."
-    )
+    raise Exception("No se pudo procesar el PDF: incluso dividido en bloques mínimos Azure lo rechazó por tamaño.")

@@ -2,14 +2,6 @@ import os
 import sys
 from pathlib import Path
 
-# ============================================================
-# FIX IMPORTS EN HOSTING / CPANEL
-# Permite ejecutar este archivo de estas formas:
-# python3 app/main.py ...
-# python3 /ruta/completa/python-ai/app/main.py ...
-# uvicorn app.main:app ...
-# ============================================================
-
 CURRENT_FILE = Path(__file__).resolve()
 APP_DIR = CURRENT_FILE.parent
 BASE_DIR = APP_DIR.parent
@@ -29,6 +21,7 @@ from fastapi.responses import JSONResponse
 
 from app.services.azure_service import analyze_pdf_with_auto_split
 from app.services.openai_service import extract_items_from_azure_tables
+from app.services.progress import write_progress
 
 app = FastAPI(title="Python AI Service")
 
@@ -47,22 +40,16 @@ def job_file(job_id: str) -> Path:
 def save_job(job_id: str, payload: Dict[str, Any]) -> None:
     final_path = job_file(job_id)
     temp_path = JOBS_DIR / f"{job_id}.tmp"
-
-    temp_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_path.replace(final_path)
 
 
 def load_job(job_id: str, retries: int = 5, delay: float = 0.15) -> Optional[Dict[str, Any]]:
     path = job_file(job_id)
-
     if not path.exists():
         return None
 
     last_error = None
-
     for _ in range(retries):
         try:
             raw = path.read_text(encoding="utf-8").strip()
@@ -163,17 +150,11 @@ def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, file
 
 @app.get("/")
 def home():
-    return {
-        "ok": True,
-        "message": "Python AI service running",
-    }
+    return {"ok": True, "message": "Python AI service running"}
 
 
 @app.post("/documents/analyze-async")
-async def analyze_document_async(
-    file: UploadFile = File(...),
-    pages_per_chunk: int = Form(5),
-):
+async def analyze_document_async(file: UploadFile = File(...), pages_per_chunk: int = Form(5)):
     try:
         job_id = str(uuid.uuid4())
         ext = Path(file.filename or "document.pdf").suffix or ".pdf"
@@ -182,13 +163,12 @@ async def analyze_document_async(
         content = await file.read()
         upload_path.write_bytes(content)
 
-        job_payload = {
+        save_job(job_id, {
             "job_id": job_id,
             "status": "queued",
             "filename": file.filename,
             "pages_per_chunk": pages_per_chunk,
-        }
-        save_job(job_id, job_payload)
+        })
 
         thread = threading.Thread(
             target=process_document_job,
@@ -197,17 +177,10 @@ async def analyze_document_async(
         )
         thread.start()
 
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": "queued",
-        }
+        return {"ok": True, "job_id": job_id, "status": "queued"}
 
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"ok": False, "message": str(e)},
-        )
+        return JSONResponse(status_code=500, content={"ok": False, "message": str(e)})
 
 
 @app.get("/documents/jobs/{job_id}")
@@ -215,23 +188,12 @@ def get_job_status(job_id: str):
     try:
         job = load_job(job_id)
     except Exception as e:
-        return JSONResponse(
-            status_code=503,
-            content={"ok": False, "message": f"Job temporalmente no disponible: {str(e)}"},
-        )
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"Job temporalmente no disponible: {str(e)}"})
 
     if not job:
-        return JSONResponse(
-            status_code=404,
-            content={"ok": False, "message": "Job no encontrado"},
-        )
+        return JSONResponse(status_code=404, content={"ok": False, "message": "Job no encontrado"})
 
-    return {
-        "ok": True,
-        "job_id": job_id,
-        "status": job.get("status"),
-        "error": job.get("error"),
-    }
+    return {"ok": True, "job_id": job_id, "status": job.get("status"), "error": job.get("error")}
 
 
 @app.get("/documents/jobs/{job_id}/result")
@@ -239,31 +201,15 @@ def get_job_result(job_id: str):
     try:
         job = load_job(job_id)
     except Exception as e:
-        return JSONResponse(
-            status_code=503,
-            content={"ok": False, "message": f"Job temporalmente no disponible: {str(e)}"},
-        )
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"Job temporalmente no disponible: {str(e)}"})
 
     if not job:
-        return JSONResponse(
-            status_code=404,
-            content={"ok": False, "message": "Job no encontrado"},
-        )
+        return JSONResponse(status_code=404, content={"ok": False, "message": "Job no encontrado"})
 
     if job.get("status") != "completed":
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": job.get("status"),
-            "error": job.get("error"),
-        }
+        return {"ok": True, "job_id": job_id, "status": job.get("status"), "error": job.get("error")}
 
-    return {
-        "ok": True,
-        "job_id": job_id,
-        "status": "completed",
-        "result": job.get("result"),
-    }
+    return {"ok": True, "job_id": job_id, "status": "completed", "result": job.get("result")}
 
 
 @app.get("/documents/jobs/{job_id}/items")
@@ -271,24 +217,13 @@ def get_items_result(job_id: str):
     try:
         job = load_job(job_id)
     except Exception as e:
-        return JSONResponse(
-            status_code=503,
-            content={"ok": False, "message": f"Job temporalmente no disponible: {str(e)}"},
-        )
+        return JSONResponse(status_code=503, content={"ok": False, "message": f"Job temporalmente no disponible: {str(e)}"})
 
     if not job:
-        return JSONResponse(
-            status_code=404,
-            content={"ok": False, "message": "Job no encontrado"},
-        )
+        return JSONResponse(status_code=404, content={"ok": False, "message": "Job no encontrado"})
 
     if job.get("status") != "completed":
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": job.get("status"),
-            "error": job.get("error"),
-        }
+        return {"ok": True, "job_id": job_id, "status": job.get("status"), "error": job.get("error")}
 
     result = job.get("result") or {}
 
@@ -296,10 +231,7 @@ def get_items_result(job_id: str):
         "ok": True,
         "job_id": job_id,
         "status": "completed",
-        "items_result": result.get("items_json") or {
-            "items_count": 0,
-            "items": [],
-        },
+        "items_result": result.get("items_json") or {"items_count": 0, "items": []},
     }
 
 
@@ -309,10 +241,16 @@ if __name__ == "__main__":
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--pages-per-chunk", type=int, default=5)
     parser.add_argument("--filename", default="document.pdf")
+    parser.add_argument("--progress-file", default="")
 
     args = parser.parse_args()
 
+    if args.progress_file:
+        os.environ["AI_PROGRESS_FILE"] = args.progress_file
+
     try:
+        write_progress(5, "Iniciando análisis", args.filename)
+
         output = analyze_document_cli(
             file_path=args.file,
             run_id=args.run_id,
@@ -320,9 +258,12 @@ if __name__ == "__main__":
             filename=args.filename,
         )
 
+        write_progress(100, "Análisis completado", "Generando cotización...")
+
         print(json.dumps(output, ensure_ascii=False))
         sys.exit(0)
 
     except Exception as e:
+        write_progress(100, "Error", str(e))
         print(str(e), file=sys.stderr)
         sys.exit(1)
