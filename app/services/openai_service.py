@@ -11,7 +11,7 @@ from openai import OpenAI
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
