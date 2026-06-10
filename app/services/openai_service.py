@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import requests
 import sys
 from pathlib import Path
 from typing import Optional, Any, Dict, List
@@ -13,6 +14,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=T
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -22,14 +24,65 @@ def _log(message: str) -> None:
 
 
 def _openai_text(prompt: str) -> str:
-    response = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": "Responde únicamente JSON válido. No uses markdown."},
-            {"role": "user", "content": prompt},
+    """
+    Usa Responses API para modelos GPT-5.x / GPT-5.4.
+    Chat Completions puede devolver 404 con algunos modelos aunque aparezcan en /v1/models.
+    """
+    if not OPENAI_API_KEY:
+        raise Exception("Falta OPENAI_API_KEY en .env")
+
+    url = f"{OPENAI_BASE_URL}/responses"
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": [
+            {
+                "role": "system",
+                "content": "Responde únicamente JSON válido. No uses markdown.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
         ],
-    )
-    return response.choices[0].message.content or ""
+        "text": {
+            "format": {
+                "type": "json_object",
+            }
+        },
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=180)
+
+    if not response.ok:
+        raise Exception(f"OpenAI Responses API error: {response.status_code} - {response.text}")
+
+    data = response.json()
+
+    if isinstance(data.get("output_text"), str) and data["output_text"].strip():
+        return data["output_text"]
+
+    parts = []
+
+    for output in data.get("output", []) or []:
+        for content in output.get("content", []) or []:
+            if isinstance(content, dict):
+                if content.get("type") in ["output_text", "text"] and content.get("text"):
+                    parts.append(content.get("text"))
+                elif content.get("text"):
+                    parts.append(content.get("text"))
+
+    text = "\n".join(parts).strip()
+
+    if not text:
+        raise Exception(f"OpenAI no devolvió texto utilizable: {data}")
+
+    return text
 
 
 def _clean_text(text: str) -> str:
@@ -491,16 +544,58 @@ def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
     bloque = "\n".join(rows)
 
     try:
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _PROMPT_SISTEMA_ITEMS},
-                {"role": "user", "content": "Filas de la tabla:\n\n" + bloque},
-            ],
-        )
+        if not OPENAI_API_KEY:
+            raise Exception("Falta OPENAI_API_KEY en .env")
 
-        data = json.loads(_extract_json_candidate(resp.choices[0].message.content or ""))
+        url = f"{OPENAI_BASE_URL}/responses"
+
+        payload = {
+            "model": OPENAI_MODEL,
+            "input": [
+                {
+                    "role": "system",
+                    "content": _PROMPT_SISTEMA_ITEMS,
+                },
+                {
+                    "role": "user",
+                    "content": "Filas de la tabla:\n\n" + bloque,
+                },
+            ],
+            "text": {
+                "format": {
+                    "type": "json_object",
+                }
+            },
+        }
+
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=180)
+
+        if not resp.ok:
+            raise Exception(f"OpenAI Responses API error: {resp.status_code} - {resp.text}")
+
+        response_data = resp.json()
+
+        if isinstance(response_data.get("output_text"), str) and response_data["output_text"].strip():
+            raw_text = response_data["output_text"]
+        else:
+            parts = []
+
+            for output in response_data.get("output", []) or []:
+                for content in output.get("content", []) or []:
+                    if isinstance(content, dict):
+                        if content.get("type") in ["output_text", "text"] and content.get("text"):
+                            parts.append(content.get("text"))
+                        elif content.get("text"):
+                            parts.append(content.get("text"))
+
+            raw_text = "\n".join(parts).strip()
+
+        data = json.loads(_extract_json_candidate(raw_text))
         items = data.get("items") or []
 
         return items if isinstance(items, list) else []
@@ -509,7 +604,6 @@ def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
         # IMPORTANTE: stderr, nunca stdout, porque Laravel puede leer stdout como JSON.
         _log(f"[extract_items] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}")
         return []
-
 
 
 def _extract_unit_and_clean_description(desc: str, unidad: Optional[str]) -> tuple[str, str]:
