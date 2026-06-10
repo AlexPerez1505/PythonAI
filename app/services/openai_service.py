@@ -22,7 +22,6 @@ def _openai_text(prompt: str) -> str:
             {"role": "system", "content": "Responde únicamente JSON válido. No uses markdown."},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.1,
     )
     return response.choices[0].message.content or ""
 
@@ -50,33 +49,8 @@ def _extract_json_candidate(text: str) -> str:
     raise Exception("OpenAI no devolvió un bloque JSON reconocible.")
 
 
-def _parse_json_strict(text: str):
+def _safe_json(text: str):
     return json.loads(_extract_json_candidate(text))
-
-
-def _repair_json_with_openai(bad_text: str):
-    prompt = f"""
-Convierte el siguiente contenido en JSON válido.
-
-Reglas:
-- Responde SOLO JSON válido.
-- No agregues explicación.
-- No uses markdown.
-- Conserva la estructura y el contenido.
-- Si falta una coma, llave o corchete, repáralo.
-
-Contenido:
-{bad_text}
-"""
-    repaired_text = _openai_text(prompt)
-    return json.loads(_extract_json_candidate(repaired_text))
-
-
-def _safe_json_from_model_output(output_text: str):
-    try:
-        return _parse_json_strict(output_text)
-    except Exception:
-        return _repair_json_with_openai(output_text)
 
 
 def structure_licitacion_text(raw_text: str) -> Dict[str, Any]:
@@ -93,7 +67,6 @@ Reglas:
 - No agregues comentarios.
 - No agregues markdown.
 - Si un dato no existe, usa null.
-- Si no estás seguro, no inventes.
 - fechas_clave debe ser arreglo.
 - anexos debe ser arreglo.
 - penalizaciones debe ser arreglo.
@@ -121,8 +94,10 @@ Estructura esperada:
 Texto:
 {compact_text}
 """
-    output_text = _openai_text(prompt)
-    return _safe_json_from_model_output(output_text)
+    try:
+        return _safe_json(_openai_text(prompt))
+    except Exception:
+        return {"partidas": []}
 
 
 def _normalize_text(value):
@@ -136,40 +111,15 @@ def _normalize_number(value):
     if value is None:
         return None
     txt = str(value).strip()
-    if not txt:
+    if txt == "":
         return None
-    txt = txt.replace(",", "").replace(" ", "").replace("O", "0").replace("o", "0")
+    txt = txt.replace(",", "").replace(" ", "")
+    if not re.match(r"^-?\d+(\.\d+)?$", txt):
+        return None
     try:
-        if "." in txt:
-            return float(txt)
-        return int(txt)
+        return float(txt) if "." in txt else int(txt)
     except Exception:
         return None
-
-
-def _normalize_yes_no(value):
-    if value is None:
-        return None
-    txt = (_normalize_text(value) or "").lower()
-    if txt in ["si", "sí", "s1", "sl", "x", "aplica", "requiere"]:
-        return "Si"
-    if txt in ["no", "n/a", "na", "no aplica"]:
-        return "No"
-    return _normalize_text(value)
-
-
-def _split_partida_subpartida(valor):
-    """ '1.1' -> (1, '1') ; '1' -> (1, None) ; texto -> (None, texto)."""
-    if valor is None:
-        return (None, None)
-    txt = str(valor).strip()
-    m = re.match(r"^(\d+)[.\-](\d+[a-zA-Z]?)$", txt)
-    if m:
-        return (_normalize_number(m.group(1)), m.group(2))
-    n = _normalize_number(txt)
-    if n is not None:
-        return (n, None)
-    return (None, txt if txt else None)
 
 
 def _build_table_matrix(table: Dict[str, Any]) -> List[List[str]]:
@@ -185,348 +135,180 @@ def _build_table_matrix(table: Dict[str, Any]) -> List[List[str]]:
     return matrix
 
 
-def _header_key(text: str) -> str:
-    txt = (text or "").lower()
-    txt = txt.replace(".", "").replace(":", "").replace("#", "")
-    txt = re.sub(r"\s+", " ", txt).strip()
-
-    # SUBPARTIDA primero (para no confundirla con partida).
-    if "subpartida" in txt or "sub partida" in txt:
-        return "subpartida"
-
-    if txt in ["no", "n°", "núm", "num"]:
-        return "numero"
-
-    if any(k in txt for k in ["núm prog", "num prog", "numero", "número", "partida", "renglon", "renglón"]):
-        return "numero"
-
-    if any(k in txt for k in ["cant min", "cantidad min", "mínima", "minima"]):
-        return "cantidad_minima"
-
-    if any(k in txt for k in ["cant max", "cantidad max", "máxima", "maxima"]):
-        return "cantidad_maxima"
-
-    if any(k in txt for k in ["cantidad", "cant", "volumen"]):
-        return "cantidad"
-
-    if any(k in txt for k in ["unidad de medida", "unidad", "u m", "u.m", "medida", "presentacion", "presentación"]):
-        return "unidad"
-
-    if any(k in txt for k in ["descripcion", "descripción", "concepto", "bien", "producto", "servicio", "nombre", "material", "articulo", "artículo"]):
-        return "descripcion"
-
-    if any(k in txt for k in ["muestra"]):
-        return "muestra"
-
-    return ""
-
-
-def _looks_like_header(row: List[str]) -> bool:
-    joined = " ".join(row).lower()
-    words = [
-        "partida", "subpartida", "núm", "num", "prog",
-        "cantidad", "cant", "unidad", "medida",
-        "descripcion", "descripción", "concepto", "bien",
-        "producto", "servicio", "muestra",
-    ]
-    score = sum(1 for w in words if w in joined)
-    return score >= 2
-
-
-def _find_header_row(matrix: List[List[str]]) -> Optional[int]:
-    best_index = None
-    best_score = 0
-    for i, row in enumerate(matrix[:12]):
-        keys = [_header_key(x) for x in row]
-        score = len([k for k in keys if k])
-        if score > best_score:
-            best_score = score
-            best_index = i
-    if best_score >= 2:
-        return best_index
-    return None
-
-
-def _column_map_from_header(row: List[str]) -> Dict[str, int]:
-    mapping = {}
-    for idx, cell in enumerate(row):
-        key = _header_key(cell)
-        if key and key not in mapping:
-            mapping[key] = idx
-    return mapping
-
-
-def _is_probable_item_row(row: List[str]) -> bool:
-    values = [_normalize_text(x) or "" for x in row]
-    non_empty = [v for v in values if v]
-    if len(non_empty) < 2:
-        return False
-    has_long_text = any(len(v) >= 15 for v in non_empty)
-    return has_long_text
-
-
-def _extract_with_mapping(row: List[str], mapping: Dict[str, int]) -> Optional[Dict[str, Any]]:
-    def get_col(key):
-        idx = mapping.get(key)
-        if idx is None or idx >= len(row):
-            return None
-        return _normalize_text(row[idx])
-
-    numero_raw = get_col("numero") or get_col("partida")
-    subpartida_raw = get_col("subpartida")
-
-    # Separa "1.1" -> partida 1 / subpartida 1
-    partida, subpartida = _split_partida_subpartida(numero_raw)
-
-    # Si hay columna de SUBPARTIDA aparte, esa manda.
-    if subpartida_raw:
-        s = _normalize_number(subpartida_raw)
-        subpartida = s if s is not None else subpartida_raw
-
-    descripcion = get_col("descripcion")
-    unidad = get_col("unidad")
-    cantidad_minima = _normalize_number(get_col("cantidad_minima"))
-    cantidad_maxima = _normalize_number(get_col("cantidad_maxima"))
-    cantidad = _normalize_number(get_col("cantidad"))
-    muestra = _normalize_yes_no(get_col("muestra"))
-
-    # Si no hay número en columnas, intenta con la primera celda (ej. "1.1").
-    if partida is None and subpartida is None:
-        values = [_normalize_text(x) or "" for x in row]
-        non_empty = [v for v in values if v]
-        if non_empty:
-            partida, subpartida = _split_partida_subpartida(non_empty[0])
-
-    if not descripcion:
-        used_indexes = set(mapping.values())
-        leftovers = []
-        for idx, value in enumerate(row):
-            clean = _normalize_text(value)
-            if not clean:
-                continue
-            if idx in used_indexes:
-                continue
-            if re.match(r"^\d+([.\-]\d+)?$", clean):  # ignora "1" o "1.1"
-                continue
-            leftovers.append(clean)
-        descripcion = " ".join(leftovers).strip() if leftovers else None
-
-    # Solo exigimos una DESCRIPCIÓN válida. El número puede faltar (continuaciones).
-    if not descripcion or len(descripcion) < 5:
-        return None
-
-    return {
-        "partida": partida,
-        "subpartida": subpartida,
-        "numero": partida,
-        "descripcion": descripcion,
-        "nombre": descripcion,
-        "unidad": unidad,
-        "cantidad": cantidad,
-        "cantidad_minima": cantidad_minima,
-        "cantidad_maxima": cantidad_maxima,
-        "presentar_muestra": muestra,
-    }
-
-
-def _extract_heuristic(row: List[str]) -> Optional[Dict[str, Any]]:
-    values = [_normalize_text(x) or "" for x in row]
-    non_empty = [v for v in values if v]
-    if len(non_empty) < 2:
-        return None
-
-    first = non_empty[0]
-    partida, subpartida = _split_partida_subpartida(first)
-
-    numbers_after = []
-    text_parts = []
-    unidad = None
-    muestra = None
-
-    unidad_keywords = [
-        "pieza", "pza", "pzas", "paquete", "caja", "bolsa", "rollo", "metro",
-        "litro", "kg", "kilogramo", "servicio", "juego", "par", "lote",
-        "unidad", "frasco", "bote", "sobre", "hoja", "block"
-    ]
-
-    start = 1 if (partida is not None or subpartida is not None) else 0
-    for value in non_empty[start:]:
-        value_clean = value.strip()
-        num = _normalize_number(value_clean)
-        if num is not None and re.match(r"^[\d,\.\sOo]+$", value_clean):
-            numbers_after.append(num)
-            continue
-        low = value_clean.lower()
-        if unidad is None and any(low == u or low.startswith(u + " ") for u in unidad_keywords):
-            unidad = value_clean
-            continue
-        if muestra is None and low in ["si", "sí", "no", "s1", "sl", "x", "n/a", "na"]:
-            muestra = _normalize_yes_no(value_clean)
-            continue
-        text_parts.append(value_clean)
-
-    descripcion = " ".join(text_parts).strip()
-    if not descripcion or len(descripcion) < 5:
-        return None
-
-    cantidad_minima = None
-    cantidad_maxima = None
-    cantidad = None
-    if len(numbers_after) >= 2:
-        cantidad_minima = numbers_after[0]
-        cantidad_maxima = numbers_after[1]
-    elif len(numbers_after) == 1:
-        cantidad = numbers_after[0]
-
-    return {
-        "partida": partida,
-        "subpartida": subpartida,
-        "numero": partida,
-        "descripcion": descripcion,
-        "nombre": descripcion,
-        "unidad": unidad,
-        "cantidad": cantidad,
-        "cantidad_minima": cantidad_minima,
-        "cantidad_maxima": cantidad_maxima,
-        "presentar_muestra": muestra,
-    }
-
-
-def _extract_items_from_matrix(matrix: List[List[str]], inherited_mapping: Optional[Dict[str, int]] = None):
-    """Devuelve {'items': [...], 'mapping': {...}|None}.
-    Si la tabla no tiene encabezado propio, usa el encabezado heredado (continuación)."""
-    items = []
-
-    header_index = _find_header_row(matrix)
-
-    if header_index is not None:
-        mapping = _column_map_from_header(matrix[header_index])
-        for row in matrix[header_index + 1:]:
-            if _looks_like_header(row):
-                continue
-            parsed = _extract_with_mapping(row, mapping)
-            if parsed:
-                items.append(parsed)
-        return {"items": items, "mapping": mapping}
-
-    # Sin encabezado propio: si venimos de una tabla con encabezado, es continuación.
-    if inherited_mapping:
-        for row in matrix:
-            if _looks_like_header(row):
-                continue
-            parsed = _extract_with_mapping(row, inherited_mapping)
-            if parsed:
-                items.append(parsed)
-        if items:
-            return {"items": items, "mapping": inherited_mapping}
-
-    # Último recurso: heurística por fila.
+def _matrix_to_rows(matrix: List[List[str]]) -> List[str]:
+    rows = []
     for row in matrix:
-        if _looks_like_header(row):
-            continue
-        if not _is_probable_item_row(row):
-            continue
-        parsed = _extract_heuristic(row)
-        if parsed:
-            items.append(parsed)
-
-    return {"items": items, "mapping": inherited_mapping}
+        cells = [(c or "").strip() for c in row]
+        if any(cells):
+            rows.append(" | ".join(cells))
+    return rows
 
 
-def _extract_items_from_text(raw_text: str) -> List[Dict[str, Any]]:
-    lines = []
-    for line in (raw_text or "").splitlines():
-        clean = _normalize_text(line)
-        if clean:
-            lines.append(clean)
+# ===================== EXTRACCIÓN CON OPENAI (cualquier formato) =====================
 
-    items = []
-    i = 0
-    unidad_words = r"(PIEZA|PIEZAS|PZA|PZAS|PAQUETE|CAJA|BOLSA|ROLLO|SERVICIO|JUEGO|PAR|LOTE|BOTE|FRASCO|HOJA|BLOCK|KG|LITRO|METRO)"
+_PROMPT_CLASIFICAR = (
+    "Te paso el encabezado y algunas filas de UNA tabla de un documento de licitación de gobierno (México). "
+    "Decide si esta tabla LISTA PRODUCTOS o SERVICIOS solicitados / partidas a cotizar.\n"
+    "Devuelve SOLO JSON: {\"es_productos\": true|false}.\n"
+    "Es false si la tabla es de: fechas o calendario, condiciones/forma de pago, penalizaciones, "
+    "cláusulas o requisitos legales, criterios de evaluación, datos del licitante, firmas, índice, "
+    "glosario, garantías, domicilios, o cualquier cosa que NO sea una lista de bienes/servicios a cotizar.\n"
+    "Ante la duda, responde true."
+)
 
-    while i < len(lines):
-        line = lines[i]
-        if re.match(r"^\d+([.\-]\d+)?$", line):
-            partida, subpartida = _split_partida_subpartida(line)
-            chunk = lines[i:i + 8]
-            nums = []
-            unidad = None
-            desc_parts = []
-            for part in chunk[1:]:
-                if _normalize_number(part) is not None and re.match(r"^[\d,\.\sOo]+$", part):
-                    nums.append(_normalize_number(part))
-                    continue
-                if unidad is None and re.match(f"^{unidad_words}$", part.upper()):
-                    unidad = part
-                    continue
-                if len(part) > 8:
-                    desc_parts.append(part)
-            descripcion = " ".join(desc_parts).strip()
-            if (partida is not None or subpartida is not None) and descripcion and len(descripcion) >= 10:
-                items.append({
-                    "partida": partida,
-                    "subpartida": subpartida,
-                    "numero": partida,
-                    "descripcion": descripcion,
-                    "nombre": descripcion,
-                    "unidad": unidad,
-                    "cantidad": nums[0] if len(nums) == 1 else None,
-                    "cantidad_minima": nums[0] if len(nums) >= 2 else None,
-                    "cantidad_maxima": nums[1] if len(nums) >= 2 else None,
-                    "presentar_muestra": None,
-                })
-                i += max(4, len(chunk))
-                continue
-        i += 1
-    return items
+_PROMPT_SISTEMA_ITEMS = (
+    "Eres un extractor experto de partidas de anexos técnicos de licitaciones públicas en México. "
+    "Te paso filas de una tabla que YA se confirmó que lista productos/servicios "
+    "(cada fila trae sus celdas separadas por ' | '). Extrae CADA renglón que sea un producto/servicio. Reglas:\n"
+    "- 'descripcion': el NOMBRE/DESCRIPCIÓN real del producto. NUNCA pongas aquí el código o la clave.\n"
+    "- 'clave': el código/clave de partida presupuestal si existe (ej. '21101-0106'); si no, null.\n"
+    "- 'partida': número de partida si existe (entero). Si la numeración es jerárquica '1.1', usa partida=1 y subpartida='1'. Si no hay, null.\n"
+    "- 'subpartida': solo para numeración jerárquica (lo que va después del punto); si no aplica, null.\n"
+    "- 'unidad': unidad de medida (PIEZA, CAJA, PAQUETE, KG...). Si cantidad y unidad vienen juntas ('10 caja/paquete 90 piezas'), pon cantidad=10 y unidad='CAJA'.\n"
+    "- 'cantidad': cantidad solicitada (número). 'cantidad_minima'/'cantidad_maxima' si el renglón trae mínimo y máximo.\n"
+    "- 'muestra': 'Si'/'No' si la tabla lo indica; si no, null.\n"
+    "- IGNORA encabezados de la tabla y filas de subtotal/total o notas al pie.\n"
+    "Devuelve SOLO JSON con esta forma EXACTA: "
+    "{\"items\":[{\"partida\":null,\"subpartida\":null,\"clave\":null,\"descripcion\":\"\",\"unidad\":\"\",\"cantidad\":null,\"cantidad_minima\":null,\"cantidad_maxima\":null,\"muestra\":null}]}"
+)
 
 
-def _dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Quita SOLO filas 100% idénticas. Conserva el ORDEN de aparición
-    (los números de partida pueden repetirse entre tablas o faltar)."""
-    unique = []
-    seen = set()
-    for item in items:
-        desc = str(item.get("descripcion") or item.get("nombre") or "").strip().lower()
-        if not desc:
-            continue
-        numero = str(item.get("numero") or item.get("partida") or "").strip()
-        sub = str(item.get("subpartida") or "").strip()
-        cmin = str(item.get("cantidad_minima") if item.get("cantidad_minima") is not None else "")
-        cmax = str(item.get("cantidad_maxima") if item.get("cantidad_maxima") is not None else "")
-        cant = str(item.get("cantidad") if item.get("cantidad") is not None else "")
-        key = (numero, sub, desc[:160], cmin, cmax, cant)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    return unique
+def _es_tabla_de_productos(rows: List[str]) -> bool:
+    preview = "\n".join(rows[:8])
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _PROMPT_CLASIFICAR},
+                {"role": "user", "content": "Tabla:\n\n" + preview},
+            ],
+        )
+        data = json.loads(_extract_json_candidate(resp.choices[0].message.content or ""))
+        return bool(data.get("es_productos", True))
+    except Exception:
+        return True  # ante la duda, intenta extraer (el extractor también filtra)
+
+
+def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
+    bloque = "\n".join(rows)
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": _PROMPT_SISTEMA_ITEMS},
+                {"role": "user", "content": "Filas de la tabla:\n\n" + bloque},
+            ],
+        )
+        data = json.loads(_extract_json_candidate(resp.choices[0].message.content or ""))
+        items = data.get("items") or []
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
 
 
 def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[str, Any]:
     tables = raw_analyze_result.get("tables", []) or []
-    all_items = []
-    last_mapping = None
+    api_key = os.getenv("OPENAI_API_KEY", "")
 
+    crudos_all: List[Dict[str, Any]] = []
+
+    if api_key and tables:
+        for table in tables:
+            rows = _matrix_to_rows(_build_table_matrix(table))
+            if len(rows) < 2:
+                continue
+            # 1) Clasifica: ¿esta tabla es de productos?
+            if not _es_tabla_de_productos(rows):
+                continue
+            # 2) Extrae por lotes de 45 filas (tablas que abarcan varias hojas).
+            for i in range(0, len(rows), 45):
+                crudos_all.extend(_openai_extract_chunk(rows[i:i + 45]))
+
+    if crudos_all:
+        out = []
+        seen = set()
+        seq = 0
+        for it in crudos_all:
+            if not isinstance(it, dict):
+                continue
+            desc = _normalize_text(it.get("descripcion") or it.get("nombre"))
+            if not desc or len(desc) < 3:
+                continue
+
+            clave = _normalize_text(it.get("clave"))
+            sub = _normalize_text(it.get("subpartida"))
+            cant = _normalize_number(it.get("cantidad"))
+
+            key = ((clave or ""), desc.lower()[:160], str(cant or ""), (sub or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            seq += 1
+            partida = _normalize_number(it.get("partida"))
+
+            muestra = _normalize_text(it.get("muestra"))
+            if muestra:
+                m = muestra.lower()
+                muestra = "Si" if m in ["si", "sí", "x", "aplica"] else ("No" if m in ["no", "n/a", "na"] else None)
+
+            out.append({
+                "partida": partida if partida is not None else seq,
+                "subpartida": sub,
+                "numero": partida if partida is not None else seq,
+                "clave": clave,
+                "descripcion": desc,
+                "nombre": desc,
+                "unidad": _normalize_text(it.get("unidad")) or "PIEZA",
+                "cantidad": cant,
+                "cantidad_minima": _normalize_number(it.get("cantidad_minima")),
+                "cantidad_maxima": _normalize_number(it.get("cantidad_maxima")),
+                "presentar_muestra": muestra,
+            })
+
+        return {"items_count": len(out), "items": out}
+
+    # ===== Fallback sin OpenAI: heurística básica por fila (todas las tablas) =====
+    rows_text: List[str] = []
     for table in tables:
-        matrix = _build_table_matrix(table)
-        res = _extract_items_from_matrix(matrix, inherited_mapping=last_mapping)
-        all_items.extend(res.get("items") or [])
-        if res.get("mapping"):
-            last_mapping = res["mapping"]
+        rows_text.extend(_matrix_to_rows(_build_table_matrix(table)))
+    if not rows_text:
+        content = raw_analyze_result.get("content", "") or ""
+        rows_text = [l.strip() for l in content.splitlines() if l.strip()]
 
-    if not all_items:
-        raw_text = raw_analyze_result.get("content", "") or ""
-        all_items.extend(_extract_items_from_text(raw_text))
+    fallback = []
+    seq = 0
+    for line in rows_text:
+        cells = [c.strip() for c in line.split("|")]
+        non_empty = [c for c in cells if c]
+        if len(non_empty) < 2:
+            continue
+        desc = ""
+        for c in non_empty:
+            if not re.match(r"^[\d\.,\s/\-]+$", c) and len(c) > len(desc):
+                desc = c
+        if not desc or len(desc) < 5:
+            continue
+        cantidad = None
+        for c in non_empty:
+            num = _normalize_number(c)
+            if num is not None and cantidad is None:
+                cantidad = num
+        seq += 1
+        fallback.append({
+            "partida": seq,
+            "subpartida": None,
+            "numero": seq,
+            "clave": None,
+            "descripcion": desc,
+            "nombre": desc,
+            "unidad": "PIEZA",
+            "cantidad": cantidad,
+            "cantidad_minima": None,
+            "cantidad_maxima": None,
+            "presentar_muestra": None,
+        })
 
-    unique = _dedupe_items(all_items)
-
-    # SIEMPRE debe haber unidad de medida.
-    for it in unique:
-        if not it.get("unidad"):
-            it["unidad"] = "PIEZA"
-
-    return {
-        "items_count": len(unique),
-        "items": unique,
-    }
+    return {"items_count": len(fallback), "items": fallback}
