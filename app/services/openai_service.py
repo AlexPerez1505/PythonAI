@@ -424,26 +424,31 @@ PARTIDA Y SUBPARTIDA:
 - No confundas cantidad con partida.
 
 DESCRIPCIÓN:
-- descripcion debe ser el producto o servicio real solicitado.
+- descripcion debe ser SOLO el producto o servicio real solicitado.
 - No pongas en descripcion la unidad, cantidad, clave, precio ni encabezados.
-- Si la descripción trae especificaciones técnicas, consérvalas.
-- Si la descripción dice algo como 'Block con 100 notas autoadheribles', esa frase es descripción, no unidad.
+- Si la descripción trae una presentación entre paréntesis, sepárala cuando sea unidad/presentación.
+- Ejemplo: 'Arillo metálico doble p engargolar 3/8" (caja/paquete 90 piezas)' debe quedar:
+  descripcion='Arillo metálico doble p engargolar 3/8"'
+  unidad='PAQUETE'
+- Ejemplo: 'Marcador permanente negro (caja con 12 piezas)' debe quedar:
+  descripcion='Marcador permanente negro'
+  unidad='CAJA'
+- Ejemplo: 'Bolígrafo punto mediano (paquete con 10 piezas)' debe quedar:
+  descripcion='Bolígrafo punto mediano'
+  unidad='PAQUETE'
+- Si la descripción dice algo como 'Block con 100 notas autoadheribles' y eso es el nombre normal del producto, conserva esa frase en descripcion.
 
 UNIDAD DE MEDIDA:
 - Usa sentido común comercial.
-- unidad debe ser la presentación solicitada EXACTA o la unidad comercial más fiel a la tabla.
-- Si la tabla dice 'PAQUETE CON 100 PIEZAS', unidad debe ser 'PAQUETE CON 100 PIEZAS'.
-- Si la tabla dice 'CAJA CON 12 PIEZAS', unidad debe ser 'CAJA CON 12 PIEZAS'.
-- Si la tabla dice 'BOLSA CON 50 PIEZAS', unidad debe ser 'BOLSA CON 50 PIEZAS'.
-- Si dice 'PAQUETE', unidad debe ser 'PAQUETE'.
-- Si dice 'PIEZA', unidad debe ser 'PIEZA'.
-- Si dice 'SERVICIO', unidad debe ser 'SERVICIO'.
-- No reduzcas presentaciones compuestas a PIEZA.
-- No cambies PAQUETE CON 100 PIEZAS por PIEZA.
-- No cambies CAJA CON 12 PIEZAS por PIEZA.
-- No cambies BOLSA CON 50 PIEZAS por PIEZA.
-- Si una celda combina cantidad y unidad, interpreta correctamente cuál número es cantidad solicitada y cuál pertenece a la presentación.
-- Ejemplo: cantidad solicitada=10 y unidad='PAQUETE CON 100 PIEZAS' significa que solicitan 10 paquetes, no 100 piezas.
+- unidad debe ser la unidad comercial SIMPLE con la que se compra/cotiza: PAQUETE, CAJA, BOLSA, FRASCO, BOTELLA, ROLLO, JUEGO, KIT, SERVICIO, PIEZA, etc.
+- Si el texto dice 'caja/paquete 90 piezas', usa unidad='PAQUETE' o unidad='CAJA', pero NUNCA unidad='PIEZA'.
+- Si el texto dice 'paquete con 100 piezas', usa unidad='PAQUETE', no 'PIEZA'.
+- Si el texto dice 'caja con 12 piezas', usa unidad='CAJA', no 'PIEZA'.
+- Si el texto dice 'bolsa con 50 piezas', usa unidad='BOLSA', no 'PIEZA'.
+- Si el texto dice solo 'pieza' y no hay otra presentación, usa unidad='PIEZA'.
+- No metas la presentación completa en unidad; no pongas 'PAQUETE CON 100 PIEZAS'. Pon solamente 'PAQUETE'.
+- No dejes la presentación dentro de descripcion cuando sea claramente unidad/presentación.
+- El número de piezas de una presentación no es la cantidad solicitada. Ejemplo: cantidad=10 y unidad='PAQUETE' con presentación de 90 piezas significa que solicitan 10 paquetes.
 
 CANTIDADES:
 - cantidad_minima debe ser la cantidad mínima si aparece.
@@ -456,7 +461,7 @@ CANTIDADES:
   4. Si no existe ninguna cantidad, cantidad_cotizada = 1.
 - Nunca uses cantidad_maxima como cantidad_cotizada si también existe cantidad_minima.
 - No confundas números de partida, claves, páginas o presentaciones con cantidad solicitada.
-- En 'PAQUETE CON 100 PIEZAS', el 100 pertenece a la unidad/presentación, no necesariamente a cantidad solicitada.
+- En 'PAQUETE CON 100 PIEZAS', el 100 pertenece a la presentación, no necesariamente a cantidad solicitada.
 
 CLAVE:
 - clave es código, clave presupuestal, SKU, clave CABMS o código de partida si aparece.
@@ -506,6 +511,73 @@ def _openai_extract_chunk(rows: List[str]) -> List[Dict[str, Any]]:
         return []
 
 
+
+def _extract_unit_and_clean_description(desc: str, unidad: Optional[str]) -> tuple[str, str]:
+    """
+    Usa sentido común mínimo como red de seguridad si la IA deja la presentación
+    dentro de la descripción o devuelve PIEZA cuando realmente era CAJA/PAQUETE/etc.
+    """
+    desc = _normalize_text(desc) or ""
+    unidad = _normalize_text(unidad) or ""
+
+    original_desc = desc
+    joined = f"{desc} {unidad}".lower()
+    joined_plain = _normalize_for_filter(joined)
+
+    # Preferencia cuando aparecen varias palabras. En "caja/paquete 90 piezas"
+    # normalmente cotizas por paquete/presentación, y sobre todo no por PIEZA.
+    unit_priority = [
+        ("paquete", "PAQUETE"),
+        ("paq", "PAQUETE"),
+        ("caja", "CAJA"),
+        ("bolsa", "BOLSA"),
+        ("frasco", "FRASCO"),
+        ("botella", "BOTELLA"),
+        ("rollo", "ROLLO"),
+        ("juego", "JUEGO"),
+        ("kit", "KIT"),
+        ("servicio", "SERVICIO"),
+    ]
+
+    inferred = None
+    for token, unit_name in unit_priority:
+        if re.search(rf"\b{re.escape(token)}\b", joined_plain):
+            inferred = unit_name
+            break
+
+    # Si la unidad venía vacía o era PIEZA pero hay presentación en el texto,
+    # reemplazamos por la unidad comercial inferida.
+    unidad_plain = _normalize_for_filter(unidad)
+    if inferred and (not unidad or unidad_plain in ["pieza", "piezas", "pza", "pz", "pzs"]):
+        unidad = inferred
+
+    # Si la unidad venía compuesta, simplificarla: "PAQUETE CON 100 PIEZAS" -> "PAQUETE"
+    if not inferred and unidad:
+        unidad_text_plain = _normalize_for_filter(unidad)
+        for token, unit_name in unit_priority:
+            if re.search(rf"\b{re.escape(token)}\b", unidad_text_plain):
+                unidad = unit_name
+                break
+
+    # Quitar paréntesis de presentación de la descripción:
+    # "(caja/paquete 90 piezas)", "(caja con 12 piezas)", "(paquete c/10 piezas)".
+    def should_remove_parenthetical(match: re.Match) -> str:
+        inside = match.group(1)
+        inside_plain = _normalize_for_filter(inside)
+        has_container = any(re.search(rf"\b{re.escape(token)}\b", inside_plain) for token, _ in unit_priority)
+        has_piece_count = bool(re.search(r"\b\d+\b", inside_plain)) and bool(re.search(r"\b(pieza|piezas|pza|pz|pzs)\b", inside_plain))
+        if has_container or has_piece_count:
+            return ""
+        return match.group(0)
+
+    desc = re.sub(r"\(([^)]{1,120})\)", should_remove_parenthetical, desc)
+    desc = _normalize_text(desc) or original_desc
+
+    if not unidad:
+        unidad = "PIEZA"
+
+    return desc, unidad.upper()
+
 def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     seen = set()
@@ -548,6 +620,7 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
                 cantidad_cotizada = 1
 
         unidad = _normalize_text(it.get("unidad")) or "PIEZA"
+        desc, unidad = _extract_unit_and_clean_description(desc, unidad)
 
         key = (
             (clave or ""),
@@ -751,6 +824,8 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
                     cantidad = num
                 else:
                     cantidad = num
+
+        desc, unidad = _extract_unit_and_clean_description(desc, unidad)
 
         seq += 1
 
