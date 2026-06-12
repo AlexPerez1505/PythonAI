@@ -19,6 +19,7 @@ AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
 AZURE_API_VERSION = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION", "2024-11-30")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
 
 
 # ════════════════════════════════════════════════════════════
@@ -489,13 +490,11 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON valido con esta estr
     "ficha.organismo": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "ficha.objeto_licitacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "ficha.medio_participacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-
     "fechas_clave.fecha_publicacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "fechas_clave.junta_aclaraciones": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "fechas_clave.presentacion_apertura": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "fechas_clave.fallo": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "fechas_clave.vigencia_contrato": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-
     "resumen_ejecutivo.0": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "resumen_ejecutivo.1": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "resumen_ejecutivo.2": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
@@ -551,29 +550,30 @@ def _get_openai_models() -> List[str]:
     return ["gpt-5.4-mini"]
 
 
-def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
-    if not OPENAI_API_KEY:
-        raise Exception("Falta OPENAI_API_KEY en .env")
+def _extract_text_from_responses_api(response: Any) -> str:
+    output_text = getattr(response, "output_text", None)
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise Exception("Falta paquete 'openai'. Instala: pip install openai")
+    if output_text:
+        return str(output_text).strip()
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    parts = []
 
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": LICITACION_SYSTEM_PROMPT},
-            {"role": "user", "content": _build_licitacion_prompt(raw_text)},
-        ],
-    }
+    output = getattr(response, "output", None) or []
 
-    response = client.chat.completions.create(**kwargs)
-    content = response.choices[0].message.content or "{}"
+    for item in output:
+        content = getattr(item, "content", None) or []
 
-    clean = content.strip()
+        for block in content:
+            text = getattr(block, "text", None)
+
+            if text:
+                parts.append(str(text))
+
+    return "\n".join(parts).strip()
+
+
+def _parse_model_json(model: str, content: str) -> Dict[str, Any]:
+    clean = (content or "").strip()
 
     if clean.startswith("```"):
         clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.IGNORECASE)
@@ -591,6 +591,47 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
                 pass
 
         raise Exception(f"Modelo {model} devolvio JSON invalido: {content[:500]}")
+
+
+def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
+    if not OPENAI_API_KEY:
+        raise Exception("Falta OPENAI_API_KEY en .env")
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise Exception("Falta paquete 'openai'. Instala: pip install openai")
+
+    client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        base_url=OPENAI_BASE_URL,
+    )
+
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "system",
+                "content": LICITACION_SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": _build_licitacion_prompt(raw_text),
+            },
+        ],
+        text={
+            "format": {
+                "type": "json_object",
+            }
+        },
+    )
+
+    content = _extract_text_from_responses_api(response)
+
+    if not content:
+        raise Exception(f"Modelo {model} no devolvio contenido.")
+
+    return _parse_model_json(model, content)
 
 
 def structure_licitacion_with_openai(raw_text: str) -> Dict[str, Any]:
