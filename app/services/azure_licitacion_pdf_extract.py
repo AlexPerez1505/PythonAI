@@ -550,24 +550,21 @@ def _get_openai_models() -> List[str]:
     return ["gpt-5.4-mini"]
 
 
-def _extract_text_from_responses_api(response: Any) -> str:
-    output_text = getattr(response, "output_text", None)
-
-    if output_text:
-        return str(output_text).strip()
+def _extract_text_from_response_payload(payload: Dict[str, Any]) -> str:
+    """
+    Extrae texto desde Responses API sin depender del SDK de OpenAI.
+    """
+    if isinstance(payload.get("output_text"), str) and payload["output_text"].strip():
+        return payload["output_text"].strip()
 
     parts = []
 
-    output = getattr(response, "output", None) or []
+    for item in payload.get("output", []) or []:
+        for block in item.get("content", []) or []:
+            text = block.get("text")
 
-    for item in output:
-        content = getattr(item, "content", None) or []
-
-        for block in content:
-            text = getattr(block, "text", None)
-
-            if text:
-                parts.append(str(text))
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
 
     return "\n".join(parts).strip()
 
@@ -597,19 +594,19 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
     if not OPENAI_API_KEY:
         raise Exception("Falta OPENAI_API_KEY en .env")
 
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise Exception("Falta paquete 'openai'. Instala: pip install openai")
+    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
+    url = f"{base_url}/v1/responses"
 
-    client = OpenAI(
-        api_key=OPENAI_API_KEY,
-        base_url=OPENAI_BASE_URL,
-    )
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    response = client.responses.create(
-        model=model,
-        input=[
+    timeout_seconds = int(os.getenv("OPENAI_TIMEOUT", "300"))
+
+    body = {
+        "model": model,
+        "input": [
             {
                 "role": "system",
                 "content": LICITACION_SYSTEM_PROMPT,
@@ -619,17 +616,33 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
                 "content": _build_licitacion_prompt(raw_text),
             },
         ],
-        text={
+        "text": {
             "format": {
-                "type": "json_object",
+                "type": "json_object"
             }
         },
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=body,
+        timeout=timeout_seconds,
     )
 
-    content = _extract_text_from_responses_api(response)
+    if not response.ok:
+        raise Exception(
+            f"OpenAI Responses API error {response.status_code}: {response.text[:1000]}"
+        )
+
+    payload = response.json()
+    content = _extract_text_from_response_payload(payload)
 
     if not content:
-        raise Exception(f"Modelo {model} no devolvio contenido.")
+        raise Exception(
+            f"Modelo {model} no devolvio contenido. Payload: "
+            f"{json.dumps(payload, ensure_ascii=False)[:1000]}"
+        )
 
     return _parse_model_json(model, content)
 
