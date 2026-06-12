@@ -63,14 +63,6 @@ def _is_empty_value(value: Any) -> bool:
     )
 
 
-def _clean_for_search(text: Any) -> str:
-    text = _norm(text) or ""
-    text = text.lower()
-    text = re.sub(r"[^\wáéíóúñü\s]", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
 # ════════════════════════════════════════════════════════════
 # AZURE DOCUMENT INTELLIGENCE
 # ════════════════════════════════════════════════════════════
@@ -95,6 +87,7 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         raise Exception(f"Azure analyze error: {response.status_code} - {response.text}")
 
     operation_location = response.headers.get("operation-location")
+
     if not operation_location:
         raise Exception("Azure no devolvio operation-location")
 
@@ -218,13 +211,6 @@ def analyze_pdf_with_auto_split(file_bytes: bytes, pages_per_chunk: int = 5) -> 
 
 
 def azure_result_to_page_marked_text(analyze_result: Dict[str, Any]) -> str:
-    """
-    Convierte el resultado de Azure en texto con marcas de página:
-    [PAGINA 1]
-    texto...
-
-    Esto permite que OpenAI y el fallback local sepan de qué página salió cada dato.
-    """
     pages = analyze_result.get("pages", []) or []
     page_blocks = []
 
@@ -308,17 +294,6 @@ def _make_quote(raw_text: str, pos: int, length: int = 350) -> str:
 
 
 def _find_evidence_for_value(raw_text: str, value: Any) -> Optional[Dict[str, Any]]:
-    """
-    Busca el valor extraído dentro del texto original.
-    Si lo encuentra, arma:
-    {
-      "cita": "...",
-      "fuente": "archivo.pdf",
-      "pagina": 1
-    }
-
-    Esto corrige casos donde OpenAI llenó ficha/resumen pero omitió citas.
-    """
     value_text = _norm(value)
 
     if not value_text or _is_empty_value(value_text):
@@ -335,8 +310,6 @@ def _find_evidence_for_value(raw_text: str, value: Any) -> Optional[Dict[str, An
             if len(w) >= 4
         ]
 
-        # Buscar por frases parciales fuertes.
-        # Ejemplo: "invitacion cuando menos tres personas".
         for size in range(min(8, len(words)), 2, -1):
             for i in range(0, len(words) - size + 1):
                 phrase_words = words[i:i + size]
@@ -363,15 +336,6 @@ def _find_evidence_for_value(raw_text: str, value: Any) -> Optional[Dict[str, An
 
 
 def ensure_ficha_resumen_citations(structured: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
-    """
-    Garantiza citas para:
-    - ficha.*
-    - fechas_clave.*
-    - resumen_ejecutivo.N
-
-    Si OpenAI ya devolvió citas válidas, las respeta.
-    Si faltan, intenta reconstruirlas buscando el valor en el texto original.
-    """
     if not isinstance(structured, dict):
         return structured
 
@@ -423,11 +387,6 @@ def ensure_ficha_resumen_citations(structured: Dict[str, Any], raw_text: str) ->
 
 
 def ensure_checklist_citations(structured: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
-    """
-    También mejora checklist_sugerido:
-    - Si un requisito tiene fuente/página vacío, intenta encontrar evidencia.
-    - Agrega campo cita si puede encontrarla.
-    """
     if not isinstance(structured, dict):
         return structured
 
@@ -586,42 +545,10 @@ Texto de la licitacion:
 
 def _get_openai_models() -> List[str]:
     """
-    Modelo principal solicitado: gpt-5.4.
-
-    Si tu cuenta/API no reconoce gpt-5.4, el script prueba fallbacks.
-    También puedes controlar esto desde .env:
-
-    OPENAI_PRIMARY_MODEL=gpt-5.4
-    OPENAI_FALLBACK_MODELS=gpt-5.5,gpt-5,gpt-4.1,gpt-4o
+    Forzado a gpt-5.4-mini para este servicio.
+    No usa gpt-5.5, no usa fallback y no lee otro modelo aunque exista en .env.
     """
-    primary = os.getenv("OPENAI_PRIMARY_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4"))
-    fallback_raw = os.getenv("OPENAI_FALLBACK_MODELS", "gpt-5.5,gpt-5,gpt-4.1,gpt-4o")
-    fallbacks = [m.strip() for m in fallback_raw.split(",") if m.strip()]
-
-    seen = set()
-    ordered = []
-
-    for model in [primary] + fallbacks:
-        if model and model not in seen:
-            seen.add(model)
-            ordered.append(model)
-
-    return ordered
-
-
-def _is_model_error(msg: str) -> bool:
-    msg = (msg or "").lower()
-
-    return any(s in msg for s in [
-        "model_not_found",
-        "does not have access",
-        "invalid_request_error",
-        "not supported",
-        "unsupported",
-        "model `",
-        "the model",
-        "does not exist",
-    ])
+    return ["gpt-5.4-mini"]
 
 
 def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
@@ -635,13 +562,6 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
 
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    is_reasoning = (
-        model.startswith("gpt-5")
-        or model.startswith("o1")
-        or model.startswith("o3")
-        or model.startswith("o4")
-    )
-
     kwargs: Dict[str, Any] = {
         "model": model,
         "messages": [
@@ -649,12 +569,6 @@ def _call_openai_once(model: str, raw_text: str) -> Dict[str, Any]:
             {"role": "user", "content": _build_licitacion_prompt(raw_text)},
         ],
     }
-
-    # Los modelos reasoning pueden no aceptar temperature/response_format
-    # dependiendo de la version del SDK/modelo.
-    if not is_reasoning:
-        kwargs["temperature"] = 0.1
-        kwargs["response_format"] = {"type": "json_object"}
 
     response = client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content or "{}"
@@ -695,9 +609,6 @@ def structure_licitacion_with_openai(raw_text: str) -> Dict[str, Any]:
             msg = str(e)
             _log(f"OpenAI fallo con modelo {model}: {msg}")
             last_error = e
-
-            if not _is_model_error(msg):
-                raise
 
     raise last_error or Exception("Todos los modelos OpenAI fallaron")
 
