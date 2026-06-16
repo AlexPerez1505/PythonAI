@@ -463,7 +463,16 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON valido con esta estr
     {{"pregunta": "Cual es el periodo de garantia a ofertar?", "respuesta": "..."}},
     {{"pregunta": "Cual es el sistema de evaluacion?", "respuesta": "..."}},
     {{"pregunta": "Se requieren cartas de apoyo?", "respuesta": "..."}},
-    {{"pregunta": "Se deben entregar muestras fisicas?", "respuesta": "..."}}
+    {{"pregunta": "Se deben entregar muestras fisicas?", "respuesta": "..."}},
+    {{"pregunta": "Es necesario entregar documentacion regulatoria?", "respuesta": "..."}},
+    {{"pregunta": "A que hospitales o instituciones se deben entregar los productos o prestar los servicios?", "respuesta": "..."}},
+    {{"pregunta": "Existe subrogacion en caso de fallas del equipo?", "respuesta": "..."}},
+    {{"pregunta": "Se requiere la documentacion tecnica en espanol o se permiten traducciones simples?", "respuesta": "..."}},
+    {{"pregunta": "Como se realiza la adjudicacion?", "respuesta": "..."}},
+    {{"pregunta": "Se menciona si el evento esta bajo tratados de libre comercio?", "respuesta": "..."}},
+    {{"pregunta": "Cual es la vigencia o duracion del contrato?", "respuesta": "..."}},
+    {{"pregunta": "Cuales son los plazos de entrega y las condiciones para cumplir con las entregas?", "respuesta": "..."}},
+    {{"pregunta": "Es necesario realizar una visita a las instalaciones de la convocante?", "respuesta": "..."}}
   ],
   "partidas": [
     {{"numero": 1, "descripcion": "...", "unidad": "...", "cantidad": 0}}
@@ -501,7 +510,16 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON valido con esta estr
     "resumen_ejecutivo.3": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "resumen_ejecutivo.4": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "resumen_ejecutivo.5": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.6": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}}
+    "resumen_ejecutivo.6": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.7": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.8": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.9": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.10": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.11": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.12": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.13": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.14": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "resumen_ejecutivo.15": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}}
   }}
 }}
 
@@ -512,6 +530,8 @@ Reglas obligatorias:
 - Si un dato no se encuentra, usa exactamente "No se encontro informacion".
 - Las fechas deben ir en formato dd/mm/aaaa cuando sea posible.
 - En resumen_ejecutivo responde cada pregunta basandote SOLO en el texto.
+- En resumen_ejecutivo DEBES devolver EXACTAMENTE las 16 preguntas listadas arriba, en ese mismo orden, sin agregar, quitar, reordenar ni reformular ninguna. Son 16 objetos, ni mas ni menos.
+- Si una pregunta no aplica o no esta en el documento, igual incluyela con respuesta "No se encontro informacion".
 - Las partidas son los items, productos o servicios solicitados.
 - En "citas" pon texto LITERAL del documento que respalda cada campo.
 - Cada cita debe tener maximo 350 caracteres.
@@ -519,7 +539,7 @@ Reglas obligatorias:
 - El campo "pagina" debe tomarse de la marca [PAGINA X] mas cercana antes del texto citado.
 - Para cada campo de "ficha" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas".
 - Para cada campo de "fechas_clave" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas".
-- Para cada respuesta de "resumen_ejecutivo" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas".
+- Para cada respuesta de "resumen_ejecutivo" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas" (resumen_ejecutivo.0 hasta resumen_ejecutivo.15 segun el indice de la pregunta).
 - Solo omite una entrada de "citas" cuando el valor sea exactamente "No se encontro informacion".
 - La cita debe ser un fragmento literal del documento, no una explicacion.
 - Si el dato aparece en varias paginas, usa la cita mas directa y especifica.
