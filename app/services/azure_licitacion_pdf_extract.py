@@ -481,6 +481,7 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON valido con esta estr
     {{
       "requisito": "Nombre del requisito a presentar",
       "descripcion": "Detalle de que debe contener el documento",
+      "criterio_cumplimiento": "Que se necesita exactamente para considerar CUMPLIDO este requisito segun el PDF (condiciones, formato, vigencia, firmas, plazos, contenido)",
       "formato": "No aplica",
       "categoria": "Legal-Administrativo",
       "aplicabilidad": "Unico",
@@ -555,6 +556,7 @@ Reglas del checklist:
 - "status" siempre arranca en "Pendiente".
 - "prioridad": "Alta" para legal obligatorio, "Media" para tecnico comun, "Baja" para anexos secundarios.
 - Cada item de checklist_sugerido debe incluir "fuente", "pagina" y "cita".
+- Cada item de checklist_sugerido debe incluir "criterio_cumplimiento": una frase clara de QUE se necesita para marcar el requisito como CUMPLIDO segun lo que pide el PDF (por ejemplo: documento vigente, firmado, en original, dentro de cierto plazo, con cierto contenido). Nunca lo dejes vacio; si el PDF no detalla el criterio, infiere el criterio minimo razonable a partir del requisito.
 - "cita" en checklist_sugerido debe ser texto literal del documento.
 
 Texto de la licitacion:
