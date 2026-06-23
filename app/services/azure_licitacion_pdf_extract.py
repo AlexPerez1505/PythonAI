@@ -419,7 +419,231 @@ def ensure_checklist_citations(structured: Dict[str, Any], raw_text: str) -> Dic
     return structured
 
 
+
+# ════════════════════════════════════════════════════════════
+# DETERMINISTIC FALLBACKS / BUSQUEDA DIRECTA EN TEXTO AZURE
+# ════════════════════════════════════════════════════════════
+
+def _clean_extracted_value(value: Any, max_len: int = 400) -> Optional[str]:
+    text = _norm(value)
+
+    if not text:
+        return None
+
+    text = re.sub(r"\s+", " ", text).strip(" \t\n\r\0\x0B:-–—.;")
+
+    if not text:
+        return None
+
+    return text[:max_len].strip()
+
+
+def _first_regex(raw_text: str, patterns: List[str], max_len: int = 400) -> Optional[Dict[str, Any]]:
+    if not raw_text:
+        return None
+
+    for pattern in patterns:
+        match = re.search(pattern, raw_text, flags=re.IGNORECASE | re.DOTALL | re.UNICODE)
+
+        if not match:
+            continue
+
+        value = match.group(1) if match.groups() else match.group(0)
+        clean = _clean_extracted_value(value, max_len=max_len)
+
+        if not clean or _is_empty_value(clean):
+            continue
+
+        pos = match.start(1) if match.groups() else match.start()
+        meta = _extract_source_and_page(raw_text, pos)
+
+        return {
+            "value": clean,
+            "cita": _make_quote(raw_text, pos),
+            "fuente": meta.get("fuente", ""),
+            "pagina": meta.get("pagina"),
+        }
+
+    return None
+
+
+def _set_if_empty(target: Dict[str, Any], key: str, found: Optional[Dict[str, Any]], citas: Dict[str, Any]) -> None:
+    if not found:
+        return
+
+    if _is_empty_value(target.get(key)):
+        target[key] = found.get("value")
+
+    cita_key = f"ficha.{key}"
+
+    if cita_key not in citas and not _is_empty_value(found.get("value")):
+        citas[cita_key] = {
+            "cita": found.get("cita"),
+            "fuente": found.get("fuente"),
+            "pagina": found.get("pagina"),
+        }
+
+
+def _find_known_phrase(raw_text: str, phrases: List[str]) -> Optional[Dict[str, Any]]:
+    raw_low = raw_text.lower()
+
+    for phrase in phrases:
+        pos = raw_low.find(phrase.lower())
+
+        if pos < 0:
+            continue
+
+        meta = _extract_source_and_page(raw_text, pos)
+
+        return {
+            "value": phrase,
+            "cita": _make_quote(raw_text, pos),
+            "fuente": meta.get("fuente", ""),
+            "pagina": meta.get("pagina"),
+        }
+
+    return None
+
+
+def _extract_likely_organismo(raw_text: str) -> Optional[Dict[str, Any]]:
+    known = [
+        "Consejo Nacional de Fomento Educativo",
+        "Secretaría de Educación Pública",
+        "Secretaria de Educación Pública",
+        "Secretaría de Marina",
+        "Secretaria de Marina",
+        "Instituto Mexicano del Seguro Social",
+        "Instituto de Seguridad y Servicios Sociales de los Trabajadores del Estado",
+    ]
+
+    found = _find_known_phrase(raw_text, known)
+
+    if found:
+        if found["value"].lower() == "secretaria de educación pública":
+            found["value"] = "Secretaría de Educación Pública"
+        return found
+
+    conafe_pos = raw_text.lower().find("conafe")
+
+    if conafe_pos >= 0:
+        meta = _extract_source_and_page(raw_text, conafe_pos)
+        return {
+            "value": "Consejo Nacional de Fomento Educativo",
+            "cita": _make_quote(raw_text, conafe_pos),
+            "fuente": meta.get("fuente", ""),
+            "pagina": meta.get("pagina"),
+        }
+
+    return _first_regex(raw_text, [
+        r"(?:convocante|dependencia|entidad|organismo)\s*[:\-–—]?\s*([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s\.,]{8,160})",
+    ], 180)
+
+
+def _extract_payment_conditions(raw_text: str) -> Optional[Dict[str, Any]]:
+    return _first_regex(raw_text, [
+        r"(?:\d+\.\s*)?CONDICIONES\s+Y\s+FORMAS\s+DE\s+PAGO\s*(.+?)(?=\s+(?:\d+\.\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{6,}|P[aá]gina\s+\d+|--- DOCUMENTO:|$))",
+        r"(?:condiciones|forma|formas)\s+de\s+pago\s*[:\-–—]?\s*(.+?)(?=\s+(?:\d+\.\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{6,}|P[aá]gina\s+\d+|--- DOCUMENTO:|$))",
+        r"(el\s+pago\s+correspondiente\s+se\s+realizar[aá]\s+.+?)(?=\s+(?:\d+\.\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{6,}|P[aá]gina\s+\d+|--- DOCUMENTO:|$))",
+    ], 800)
+
+
+def _extract_currency(raw_text: str) -> Optional[Dict[str, Any]]:
+    found = _first_regex(raw_text, [
+        r"moneda\s+nacional\s*\(([^\)]{3,80})\)",
+        r"\b(pesos\s+mexicanos)\b",
+        r"\b(moneda\s+nacional)\b",
+    ], 120)
+
+    if not found:
+        return None
+
+    value = found.get("value") or ""
+    low = value.lower()
+
+    if "pesos mexicanos" in low:
+        found["value"] = "Pesos mexicanos"
+    elif "moneda nacional" in low:
+        found["value"] = "Moneda nacional"
+    else:
+        found["value"] = f"Moneda nacional ({value})"
+
+    return found
+
+
+def apply_deterministic_fallbacks(structured: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
+    """
+    Rellena campos que la IA dejó vacíos usando búsqueda directa sobre el texto
+    que Azure ya leyó con marcas de página. Esto evita perder datos evidentes
+    como moneda, condiciones de pago, organismo u objeto.
+    """
+    if not isinstance(structured, dict):
+        structured = {}
+
+    ficha = structured.get("ficha")
+
+    if not isinstance(ficha, dict):
+        ficha = {}
+
+    citas = structured.get("citas")
+
+    if not isinstance(citas, dict):
+        citas = {}
+
+    raw_text = raw_text or ""
+
+    tipo_evento = _find_known_phrase(raw_text, [
+        "Invitación a cuando menos tres personas",
+        "Licitación Pública Nacional",
+        "Licitación Pública Internacional",
+        "Licitación Pública",
+        "Adjudicación Directa",
+    ])
+
+    numero = _first_regex(raw_text, [
+        r"(?:n[uú]mero\s+de\s+licitaci[oó]n|no\.?\s*(?:de\s*)?(?:licitaci[oó]n|procedimiento)|procedimiento\s*(?:no\.?|n[uú]m\.?)|expediente)\s*[:#]?\s*([A-Z0-9][A-Z0-9\/\-.]{4,})",
+        r"\b((?:IA|LA|LPN|LPI|AA|AD)[\-\/]?[A-Z0-9\-\/\.]{5,})\b",
+    ], 90)
+
+    organismo = _extract_likely_organismo(raw_text)
+
+    objeto = _first_regex(raw_text, [
+        r"objeto\s+(?:de\s+)?(?:la\s+)?(?:licitaci[oó]n|contrataci[oó]n|procedimiento)\s*[:\-–—\n]\s*([^.;]{12,320})",
+        r"(adquisici[oó]n\s+de\s+(?:materiales|bienes|servicios|[úu]tiles)[^.;]{5,260})",
+        r"(contrataci[oó]n\s+de\s+(?:servicios|bienes|materiales)[^.;]{5,260})",
+        r"(servicio\s+de\s+[^.;]{10,260})",
+    ], 320)
+
+    medio = None
+
+    if re.search(r"\b(electr[oó]nic[ao]|CompraNet)\b", raw_text, flags=re.IGNORECASE):
+        medio = _find_known_phrase(raw_text, ["CompraNet", "electrónica", "electronica"])
+        if medio:
+            medio["value"] = "Electrónica"
+    elif re.search(r"\bpresencial\b", raw_text, flags=re.IGNORECASE):
+        medio = _find_known_phrase(raw_text, ["presencial"])
+        if medio:
+            medio["value"] = "Presencial"
+    elif tipo_evento:
+        medio = dict(tipo_evento)
+
+    moneda = _extract_currency(raw_text)
+    condiciones_pago = _extract_payment_conditions(raw_text)
+
+    _set_if_empty(ficha, "numero_licitacion", numero, citas)
+    _set_if_empty(ficha, "tipo_evento", tipo_evento, citas)
+    _set_if_empty(ficha, "organismo", organismo, citas)
+    _set_if_empty(ficha, "objeto_licitacion", objeto, citas)
+    _set_if_empty(ficha, "objeto", objeto, citas)
+    _set_if_empty(ficha, "medio_participacion", medio, citas)
+    _set_if_empty(ficha, "moneda_pago", moneda, citas)
+    _set_if_empty(ficha, "condiciones_pago", condiciones_pago, citas)
+
+    structured["ficha"] = ficha
+    structured["citas"] = citas
+    return structured
+
 def postprocess_structured_data(structured: Dict[str, Any], raw_text: str) -> Dict[str, Any]:
+    structured = apply_deterministic_fallbacks(structured, raw_text)
     structured = ensure_ficha_resumen_citations(structured, raw_text)
     structured = ensure_checklist_citations(structured, raw_text)
     return structured
@@ -447,7 +671,9 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON valido con esta estr
     "tipo_evento": "...",
     "organismo": "...",
     "objeto_licitacion": "...",
-    "medio_participacion": "..."
+    "medio_participacion": "...",
+    "moneda_pago": "...",
+    "condiciones_pago": "..."
   }},
   "fechas_clave": {{
     "fecha_publicacion": "...",
@@ -500,6 +726,8 @@ Analiza el texto de esta licitacion y devuelve UN SOLO JSON valido con esta estr
     "ficha.organismo": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "ficha.objeto_licitacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "ficha.medio_participacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "ficha.moneda_pago": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
+    "ficha.condiciones_pago": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "fechas_clave.fecha_publicacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "fechas_clave.junta_aclaraciones": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
     "fechas_clave.presentacion_apertura": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
@@ -539,6 +767,8 @@ Reglas obligatorias:
 - El campo "fuente" debe ser el nombre EXACTO del archivo que aparece en el encabezado "--- DOCUMENTO: nombre.pdf ---".
 - El campo "pagina" debe tomarse de la marca [PAGINA X] mas cercana antes del texto citado.
 - Para cada campo de "ficha" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas".
+- En "ficha.moneda_pago" busca especificamente "moneda nacional", "pesos mexicanos", "MXN", "dólares" o el apartado "Condiciones y formas de pago".
+- En "ficha.condiciones_pago" extrae el texto del apartado "CONDICIONES Y FORMAS DE PAGO" o el parrafo donde se explique cuándo y cómo se pagará.
 - Para cada campo de "fechas_clave" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas".
 - Para cada respuesta de "resumen_ejecutivo" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas" (resumen_ejecutivo.0 hasta resumen_ejecutivo.15 segun el indice de la pregunta).
 - Solo omite una entrada de "citas" cuando el valor sea exactamente "No se encontro informacion".
@@ -742,6 +972,7 @@ def process_files(file_paths: List[str], include_raw: bool = False) -> Dict[str,
                     "file": name,
                     "status": "ok",
                     "text_length": len(content),
+                    "raw_preview": _clean_extracted_value(content, 1200),
                 })
             else:
                 documents_info.append({
