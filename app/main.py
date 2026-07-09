@@ -106,12 +106,12 @@ def process_document_job(job_id: str, file_path: str, pages_per_chunk: int) -> N
 
 
 def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, filename: str) -> Dict[str, Any]:
-    write_progress(10, "Leyendo documento", filename)
+    write_progress(8, "Leyendo documento", filename)
 
     with open(file_path, "rb") as f:
         file_bytes = f.read()
 
-    # Azure escribe su propio progreso interno (15% -> 40%) mientras lee el PDF.
+    # Azure escribe su propio progreso interno (12% -> 40%) mientras lee el PDF.
     result = analyze_pdf_with_auto_split(
         file_bytes=file_bytes,
         model="prebuilt-layout",
@@ -253,10 +253,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # progress.py lee AI_PROGRESS_FILE del entorno. Lo seteamos desde el argumento
-    # para que funcione tanto si PHP lo pasó por env como si solo lo pasó por --progress-file.
+    # progress.py lee AI_PROGRESS_FILE del entorno. Lo seteamos desde el argumento.
     if args.progress_file:
         os.environ["AI_PROGRESS_FILE"] = args.progress_file
+
+    # El frontend manda pages_per_chunk=5. Con caché + paralelo eso ya vuela,
+    # así que respetamos lo que venga; azure_service usa AZURE_MAX_WORKERS del .env.
+    pages_per_chunk = args.pages_per_chunk if args.pages_per_chunk and args.pages_per_chunk >= 1 else 5
 
     try:
         write_progress(5, "Iniciando análisis", args.filename)
@@ -264,7 +267,7 @@ if __name__ == "__main__":
         output = analyze_document_cli(
             file_path=args.file,
             run_id=args.run_id,
-            pages_per_chunk=args.pages_per_chunk,
+            pages_per_chunk=pages_per_chunk,
             filename=args.filename,
         )
 
