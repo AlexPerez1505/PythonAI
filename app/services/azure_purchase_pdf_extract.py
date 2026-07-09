@@ -5,6 +5,7 @@ import re
 import sys
 import time
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional
 
 import requests
@@ -16,6 +17,10 @@ load_dotenv()
 AZURE_ENDPOINT = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").rstrip("/")
 AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
 AZURE_API_VERSION = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION", "2024-11-30")
+
+# Paralelización de bloques (tuneable por .env)
+AZURE_MAX_WORKERS = int(os.getenv("AZURE_MAX_WORKERS", "8"))
+AZURE_PAGES_PER_CHUNK = int(os.getenv("AZURE_PAGES_PER_CHUNK", "10"))
 
 
 def _log(message: str) -> None:
@@ -74,7 +79,7 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         status = data.get("status")
 
         if status in ["notStarted", "running"]:
-            time.sleep(2)
+            time.sleep(1)
             continue
 
         if status != "succeeded":
@@ -161,11 +166,38 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _analyze_chunks_parallel(chunks: List[bytes], model: str, max_workers: int):
+    """Procesa los bloques EN PARALELO pero devuelve los resultados EN ORDEN."""
+    results: List[Optional[Dict[str, Any]]] = [None] * len(chunks)
+    errors: Dict[int, Exception] = {}
+    workers = max(1, min(max_workers, len(chunks)))
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_analyze_single_pdf_bytes, ch, model): idx
+            for idx, ch in enumerate(chunks)
+        }
+        done = 0
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as e:
+                errors[idx] = e
+            done += 1
+            _log(f"Bloque Azure {done}/{len(chunks)} listo")
+
+    return results, errors
+
+
 def analyze_pdf_with_auto_split(
     file_bytes: bytes,
     model: str = "prebuilt-layout",
-    pages_per_chunk: int = 5,
+    pages_per_chunk: int = None,
 ) -> Dict[str, Any]:
+    if pages_per_chunk is None:
+        pages_per_chunk = AZURE_PAGES_PER_CHUNK
+
     try:
         _log("Analizando PDF con Azure Document Intelligence...")
         return _analyze_single_pdf_bytes(file_bytes, model=model)
@@ -173,31 +205,32 @@ def analyze_pdf_with_auto_split(
     except Exception as e:
         if not _is_size_error(str(e)):
             raise
-        _log("Azure rechazó el PDF completo por tamaño. Se intentará dividir.")
+        _log("Azure rechazó el PDF completo por tamaño. Se dividirá EN PARALELO.")
 
     current_chunk_size = pages_per_chunk
 
     while current_chunk_size >= 1:
-        _log(f"Dividiendo PDF en bloques de {current_chunk_size} página(s)...")
+        _log(f"Dividiendo en bloques de {current_chunk_size} pág. (paralelo, {AZURE_MAX_WORKERS} workers)...")
 
         chunks = split_pdf_bytes(file_bytes, pages_per_chunk=current_chunk_size)
-        partial_results = []
-        failed_due_to_size = False
 
-        for index, chunk_bytes in enumerate(chunks, start=1):
-            try:
-                _log(f"Procesando chunk {index}/{len(chunks)}...")
-                partial_results.append(_analyze_single_pdf_bytes(chunk_bytes, model=model))
-            except Exception as e:
-                if _is_size_error(str(e)) and current_chunk_size > 1:
-                    failed_due_to_size = True
-                    break
-                raise
+        results, errors = _analyze_chunks_parallel(chunks, model, AZURE_MAX_WORKERS)
 
-        if not failed_due_to_size:
-            return merge_azure_results(partial_results)
+        # ¿Algún error que NO sea de tamaño? -> se propaga tal cual.
+        other_error = next((e for e in errors.values() if not _is_size_error(str(e))), None)
+        if other_error is not None:
+            raise other_error
 
-        current_chunk_size = current_chunk_size // 2
+        # ¿Algún bloque falló por tamaño? -> partir más chico y reintentar.
+        size_error = any(_is_size_error(str(e)) for e in errors.values())
+
+        if size_error:
+            if current_chunk_size > 1:
+                current_chunk_size = current_chunk_size // 2
+                continue
+            raise Exception("No se pudo procesar el PDF incluso dividiéndolo en páginas individuales.")
+
+        return merge_azure_results(results)
 
     raise Exception("No se pudo procesar el PDF incluso dividiéndolo en páginas individuales.")
 
@@ -523,7 +556,7 @@ def main():
     parser.add_argument("--file", required=True)
     parser.add_argument("--category", default="compra")
     parser.add_argument("--model", default="prebuilt-layout")
-    parser.add_argument("--pages-per-chunk", type=int, default=5)
+    parser.add_argument("--pages-per-chunk", type=int, default=None)
     parser.add_argument("--raw", action="store_true", help="Devuelve respuesta cruda de Azure (debug)")
 
     args = parser.parse_args()
