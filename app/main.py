@@ -106,9 +106,12 @@ def process_document_job(job_id: str, file_path: str, pages_per_chunk: int) -> N
 
 
 def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, filename: str) -> Dict[str, Any]:
+    write_progress(10, "Leyendo documento", filename)
+
     with open(file_path, "rb") as f:
         file_bytes = f.read()
 
+    # Azure escribe su propio progreso interno (15% -> 40%) mientras lee el PDF.
     result = analyze_pdf_with_auto_split(
         file_bytes=file_bytes,
         model="prebuilt-layout",
@@ -118,7 +121,10 @@ def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, file
     analyze_result = result.get("analyzeResult", {})
     full_content = analyze_result.get("content", "") or ""
 
+    write_progress(45, "Documento leído", "Extrayendo partidas...")
+
     try:
+        # extract_items escribe su propio progreso interno (50% -> 95%).
         items = extract_items_from_azure_tables(analyze_result)
     except Exception as e:
         items = {
@@ -127,6 +133,8 @@ def analyze_document_cli(file_path: str, run_id: str, pages_per_chunk: int, file
             "items_count": 0,
             "items": [],
         }
+
+    write_progress(97, "Partidas listas", "Preparando resultado...")
 
     return {
         "ok": True,
@@ -245,6 +253,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # progress.py lee AI_PROGRESS_FILE del entorno. Lo seteamos desde el argumento
+    # para que funcione tanto si PHP lo pasó por env como si solo lo pasó por --progress-file.
     if args.progress_file:
         os.environ["AI_PROGRESS_FILE"] = args.progress_file
 
