@@ -17,9 +17,13 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=T
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-OPENAI_CORRECT_CHUNK_ITEMS = int(os.getenv("OPENAI_CORRECT_CHUNK_ITEMS", "40"))
+OPENAI_CORRECT_CHUNK_ITEMS = int(os.getenv("OPENAI_CORRECT_CHUNK_ITEMS", "120"))
 OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "low")
-OPENAI_CORRECT_MAX_WORKERS = int(os.getenv("OPENAI_CORRECT_MAX_WORKERS", "5"))
+OPENAI_CORRECT_MAX_WORKERS = int(os.getenv("OPENAI_CORRECT_MAX_WORKERS", "4"))
+OPENAI_CORRECT_ITEMS = os.getenv("OPENAI_CORRECT_ITEMS", "1") == "1"
+OPENAI_CORRECT_TIMEOUT = int(os.getenv("OPENAI_CORRECT_TIMEOUT", "45"))
+OPENAI_MAX_CANDIDATES_FOR_AI = int(os.getenv("OPENAI_MAX_CANDIDATES_FOR_AI", "240"))
+OPENAI_STRUCTURE_WITH_AI = os.getenv("OPENAI_STRUCTURE_WITH_AI", "0") == "1"
 
 
 def _log(message: str) -> None:
@@ -136,11 +140,111 @@ def _openai_text(prompt: str) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-def structure_licitacion_text(raw_text: str) -> Dict[str, Any]:
-    if not OPENAI_API_KEY:
-        raise Exception("Falta OPENAI_API_KEY en .env")
+def _first_match(patterns: List[str], text: str) -> Optional[str]:
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if m:
+            value = _normalize_text(m.group(1) if m.groups() else m.group(0))
+            if value:
+                return value[:500]
+    return None
 
-    compact_text = (raw_text or "")[:45000]
+
+def _structure_licitacion_text_fast(raw_text: str) -> Dict[str, Any]:
+    """Estructura rápida sin IA. Evita una llamada grande a OpenAI sobre 45k caracteres."""
+    text = raw_text or ""
+    compact = text[:65000]
+
+    numero = _first_match([
+        r"(?:n[uú]mero\s+de\s+procedimiento|procedimiento\s+n[oú\.]*)\s*[:\-]?\s*([^\n\r]{4,160})",
+        r"(?:licitaci[oó]n\s+p[uú]blica\s+(?:nacional|internacional)?\s*)\s*[:\-]?\s*([^\n\r]{4,160})",
+        r"\b([A-Z]{1,6}[\-/]?\d{2,6}[\-/][A-Z0-9\-/]{2,80})\b",
+    ], compact)
+
+    dependencia = _first_match([
+        r"(?:dependencia|convocante|entidad convocante|unidad compradora)\s*[:\-]?\s*([^\n\r]{4,220})",
+        r"(?:municipio|ayuntamiento)\s+de\s+([^\n\r]{4,180})",
+    ], compact)
+
+    objeto = _first_match([
+        r"(?:objeto\s+(?:de\s+la\s+)?(?:licitaci[oó]n|contrataci[oó]n)|descripci[oó]n\s+del\s+objeto)\s*[:\-]?\s*([^\n\r]{8,500})",
+        r"(?:adquisici[oó]n|contrataci[oó]n|servicio)\s+de\s+([^\n\r]{8,500})",
+    ], compact)
+
+    tipo = _first_match([
+        r"(licitaci[oó]n\s+p[uú]blica\s+(?:nacional|internacional)[^\n\r]{0,120})",
+        r"(invitaci[oó]n\s+a\s+cuando\s+menos\s+tres[^\n\r]{0,120})",
+        r"(adjudicaci[oó]n\s+directa[^\n\r]{0,120})",
+    ], compact)
+
+    moneda = _first_match([
+        r"moneda\s*[:\-]?\s*([^\n\r]{3,80})",
+        r"\b(pesos\s+mexicanos|moneda\s+nacional|mxn|usd|d[oó]lares)\b",
+    ], compact)
+
+    condiciones_pago = _first_match([
+        r"(?:condiciones\s+de\s+pago|forma\s+de\s+pago)\s*[:\-]?\s*([^\n\r]{8,500})",
+    ], compact)
+
+    vigencia_contrato = _first_match([
+        r"vigencia\s+(?:del\s+)?contrato\s*[:\-]?\s*([^\n\r]{4,300})",
+        r"vigencia\s*[:\-]?\s*([^\n\r]{4,300})",
+    ], compact)
+
+    lugar_entrega = _first_match([
+        r"lugar\s+de\s+entrega\s*[:\-]?\s*([^\n\r]{5,500})",
+        r"domicilio\s+de\s+entrega\s*[:\-]?\s*([^\n\r]{5,500})",
+    ], compact)
+
+    plazo_entrega = _first_match([
+        r"plazo\s+de\s+entrega\s*[:\-]?\s*([^\n\r]{4,300})",
+        r"tiempo\s+de\s+entrega\s*[:\-]?\s*([^\n\r]{4,300})",
+    ], compact)
+
+    fechas_clave = []
+    for label in ["junta de aclaraciones", "presentación de propuestas", "apertura de propuestas", "fallo"]:
+        pattern = rf"({label}[^\n\r]{{0,160}}(?:\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}}|\d{{1,2}}\s+de\s+[a-záéíóú]+\s+de\s+\d{{4}})[^\n\r]{{0,120}})"
+        match = _first_match([pattern], compact)
+        if match:
+            fechas_clave.append(match)
+
+    anexos = []
+    for m in re.finditer(r"\b(anexo\s+[A-Z0-9IVX\-]+[^\n\r]{0,180})", compact, re.IGNORECASE):
+        value = _normalize_text(m.group(1))
+        if value and value not in anexos:
+            anexos.append(value[:250])
+        if len(anexos) >= 20:
+            break
+
+    return {
+        "numero_procedimiento": numero,
+        "objeto": objeto,
+        "dependencia": dependencia,
+        "tipo_procedimiento": tipo,
+        "moneda": moneda,
+        "anexos": anexos,
+        "partidas": [],
+        "fechas_clave": fechas_clave,
+        "penalizaciones": [],
+        "condiciones_pago": condiciones_pago,
+        "vigencia_contrato": vigencia_contrato,
+        "lugar_entrega": lugar_entrega,
+        "plazo_entrega": plazo_entrega,
+        "resumen": objeto,
+        "fuentes": [],
+    }
+
+
+def structure_licitacion_text(raw_text: str) -> Dict[str, Any]:
+    if not OPENAI_STRUCTURE_WITH_AI:
+        _log("[structure_licitacion_text] Modo rápido: estructura básica sin OpenAI.")
+        return _structure_licitacion_text_fast(raw_text)
+
+    if not OPENAI_API_KEY:
+        _log("[structure_licitacion_text] Sin OPENAI_API_KEY. Usando estructura rápida local.")
+        return _structure_licitacion_text_fast(raw_text)
+
+    compact_text = (raw_text or "")[:25000]
 
     prompt = f"""
 Extrae del siguiente texto un JSON limpio y estructurado de una licitación pública.
@@ -619,7 +723,9 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
 
     corrected_all: List[Dict[str, Any]] = []
 
-    if OPENAI_API_KEY:
+    use_openai_correction = bool(OPENAI_API_KEY and OPENAI_CORRECT_ITEMS and len(azure_candidates) <= OPENAI_MAX_CANDIDATES_FOR_AI)
+
+    if use_openai_correction:
         chunk_size = max(1, OPENAI_CORRECT_CHUNK_ITEMS)
         chunks = [azure_candidates[i:i + chunk_size] for i in range(0, len(azure_candidates), chunk_size)]
         total_bloques = len(chunks)
@@ -650,6 +756,11 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
         for res in results_by_index:
             corrected_all.extend(res or [])
     else:
+        if OPENAI_API_KEY and OPENAI_CORRECT_ITEMS and len(azure_candidates) > OPENAI_MAX_CANDIDATES_FOR_AI:
+            _log(f"[correct_items] Se omite OpenAI por velocidad: {len(azure_candidates)} candidatos > límite {OPENAI_MAX_CANDIDATES_FOR_AI}.")
+            write_progress(88, "Corrección rápida local", f"{len(azure_candidates)} candidatos")
+        else:
+            _log("[correct_items] Corrección rápida local sin OpenAI.")
         corrected_all = azure_candidates
 
     sanitized = _sanitize_extracted_items(corrected_all)

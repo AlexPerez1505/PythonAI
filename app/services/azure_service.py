@@ -23,13 +23,14 @@ AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
 AZURE_API_VERSION = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION", "2024-11-30")
 
 # Paralelización de bloques (tuneable por .env)
-AZURE_MAX_WORKERS = int(os.getenv("AZURE_MAX_WORKERS", "8"))
-AZURE_PAGES_PER_CHUNK = int(os.getenv("AZURE_PAGES_PER_CHUNK", "10"))
+AZURE_MAX_WORKERS = int(os.getenv("AZURE_MAX_WORKERS", "5"))
+AZURE_PAGES_PER_CHUNK = int(os.getenv("AZURE_PAGES_PER_CHUNK", "20"))
 # Si el PDF tiene MÁS páginas que esto, se parte en paralelo desde el inicio.
-AZURE_FORCE_SPLIT_PAGES = int(os.getenv("AZURE_FORCE_SPLIT_PAGES", "20"))
+AZURE_FORCE_SPLIT_PAGES = int(os.getenv("AZURE_FORCE_SPLIT_PAGES", "35"))
 # Caché por hash: si un PDF ya se analizó antes, se reutiliza y NO se vuelve a llamar a Azure.
 AZURE_CACHE_ENABLED = os.getenv("AZURE_CACHE_ENABLED", "1") == "1"
 AZURE_CACHE_DIR = BASE_DIR / "storage" / "azure_cache"
+AZURE_POLL_SECONDS = float(os.getenv("AZURE_POLL_SECONDS", "1.5"))
 
 
 def _log(message: str) -> None:
@@ -151,7 +152,7 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         _log(f"[Azure] Estado actual: {status}")
 
         if status in ["notStarted", "running"]:
-            time.sleep(1)
+            time.sleep(AZURE_POLL_SECONDS)
             continue
 
         if status != "succeeded":
