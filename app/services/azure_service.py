@@ -4,7 +4,8 @@ import sys
 import time
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Any, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any, List, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -17,6 +18,13 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=T
 AZURE_ENDPOINT = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "").rstrip("/")
 AZURE_KEY = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_KEY", "")
 AZURE_API_VERSION = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION", "2024-11-30")
+
+# Paralelización de bloques (tuneable por .env)
+AZURE_MAX_WORKERS = int(os.getenv("AZURE_MAX_WORKERS", "8"))
+AZURE_PAGES_PER_CHUNK = int(os.getenv("AZURE_PAGES_PER_CHUNK", "10"))
+# Si el PDF tiene MÁS páginas que esto, se parte en paralelo desde el inicio,
+# sin esperar a que Azure lo rechace por tamaño.
+AZURE_FORCE_SPLIT_PAGES = int(os.getenv("AZURE_FORCE_SPLIT_PAGES", "20"))
 
 
 def _log(message: str) -> None:
@@ -54,8 +62,6 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
     _log(f"[Azure] API version: {AZURE_API_VERSION}")
     _log(f"[Azure] PDF size bytes: {file_size}")
     _log(f"[Azure] PDF sha256: {file_hash}")
-
-    write_progress(15, "Enviando PDF a Azure", f"{file_size // 1024} KB")
 
     url = f"{AZURE_ENDPOINT}/documentintelligence/documentModels/{model}:analyze?api-version={AZURE_API_VERSION}"
 
@@ -96,10 +102,9 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         status = data.get("status")
 
         _log(f"[Azure] Estado actual: {status}")
-        write_progress(25, "Azure está leyendo el documento", f"estado: {status}")
 
         if status in ["notStarted", "running"]:
-            time.sleep(2)
+            time.sleep(1)
             continue
 
         if status != "succeeded":
@@ -114,8 +119,6 @@ def _analyze_single_pdf_bytes(file_bytes: bytes, model: str = "prebuilt-layout")
         _log(f"[Azure] Páginas detectadas: {len(pages)}")
         _log(f"[Azure] Tablas detectadas: {len(tables)}")
         _log(f"[Azure] Caracteres extraídos: {len(content)}")
-
-        write_progress(40, "Azure terminó la lectura", f"{len(tables)} tablas, {len(pages)} páginas")
 
         return data
 
@@ -148,6 +151,13 @@ def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> List[bytes]:
         _log(f"[Split] Chunk creado páginas {start + 1}-{end} | bytes={len(chunk_bytes)} | sha256={_sha256(chunk_bytes)}")
 
     return chunks
+
+
+def _count_pdf_pages(file_bytes: bytes) -> int:
+    try:
+        return len(PdfReader(BytesIO(file_bytes)).pages)
+    except Exception:
+        return 0
 
 
 def _offset_spans(spans: List[Dict[str, Any]], content_offset: int) -> List[Dict[str, Any]]:
@@ -277,23 +287,102 @@ def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def analyze_pdf_with_auto_split(file_bytes: bytes, model: str = "prebuilt-layout", pages_per_chunk: int = 5) -> Dict[str, Any]:
+def _analyze_chunks_parallel(chunks: List[bytes], model: str, max_workers: int):
+    """Procesa los bloques EN PARALELO pero devuelve los resultados EN ORDEN."""
+    results: List[Optional[Dict[str, Any]]] = [None] * len(chunks)
+    errors: Dict[int, Exception] = {}
+    workers = max(1, min(max_workers, len(chunks)))
+    total = len(chunks)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_analyze_single_pdf_bytes, ch, model): idx
+            for idx, ch in enumerate(chunks)
+        }
+        done = 0
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                results[idx] = fut.result()
+                _log(f"[Azure] Chunk {idx + 1}/{total} procesado correctamente.")
+            except Exception as e:
+                errors[idx] = e
+                _log(f"[Azure] Error procesando chunk {idx + 1}/{total}: {e}")
+            done += 1
+            write_progress(20 + int(20 * done / max(total, 1)), "Azure leyendo el PDF", f"bloque {done} de {total}")
+
+    return results, errors
+
+
+def _split_and_analyze_parallel(file_bytes: bytes, model: str, pages_per_chunk: int) -> Dict[str, Any]:
+    """
+    Parte el PDF en bloques y los analiza EN PARALELO.
+    Si algún bloque falla por tamaño, reduce el tamaño de bloque a la mitad
+    y reintenta hasta llegar a 1 página por bloque.
+    """
+    current_chunk_size = pages_per_chunk
+
+    while current_chunk_size >= 1:
+        _log(f"[Split] Dividiendo en bloques de {current_chunk_size} pág. (paralelo, {AZURE_MAX_WORKERS} workers)...")
+        write_progress(20, "Dividiendo el PDF", f"bloques de {current_chunk_size} página(s)")
+
+        chunks = split_pdf_bytes(file_bytes, pages_per_chunk=current_chunk_size)
+
+        results, errors = _analyze_chunks_parallel(chunks, model, AZURE_MAX_WORKERS)
+
+        # ¿Algún error que NO sea de tamaño? -> se propaga tal cual.
+        other_error = next((e for e in errors.values() if not _is_size_error(str(e))), None)
+        if other_error is not None:
+            raise other_error
+
+        # ¿Algún bloque falló por tamaño? -> partir más chico y reintentar.
+        if any(_is_size_error(str(e)) for e in errors.values()):
+            if current_chunk_size > 1:
+                _log("[Azure] Algún chunk todavía muy grande. Se reducirá el tamaño del bloque.")
+                current_chunk_size = current_chunk_size // 2
+                continue
+            raise Exception("No se pudo procesar el PDF: incluso dividido en bloques mínimos Azure lo rechazó por tamaño.")
+
+        _log("[Azure] Todos los chunks procesados correctamente. Haciendo merge...")
+        return merge_azure_results(results)
+
+    raise Exception("No se pudo procesar el PDF: incluso dividido en bloques mínimos Azure lo rechazó por tamaño.")
+
+
+def analyze_pdf_with_auto_split(file_bytes: bytes, model: str = "prebuilt-layout", pages_per_chunk: int = None) -> Dict[str, Any]:
     if not file_bytes:
         raise Exception("El PDF está vacío o no se recibieron bytes.")
 
+    if pages_per_chunk is None:
+        pages_per_chunk = AZURE_PAGES_PER_CHUNK
+
     original_hash = _sha256(file_bytes)
     original_size = len(file_bytes)
+    total_pages = _count_pdf_pages(file_bytes)
 
     _log("========== NUEVO ANALISIS PDF ==========")
     _log(f"[PDF Original] size bytes: {original_size}")
     _log(f"[PDF Original] sha256: {original_hash}")
     _log(f"[PDF Original] model: {model}")
+    _log(f"[PDF Original] total páginas: {total_pages}")
     _log(f"[PDF Original] pages_per_chunk inicial: {pages_per_chunk}")
 
+    write_progress(15, "Preparando análisis", f"{total_pages} páginas")
+
+    # Si el PDF es grande en PÁGINAS, partimos EN PARALELO desde el inicio.
+    # No esperamos a que Azure lo rechace por tamaño: un solo job de muchas
+    # páginas es lento aunque el archivo pese poco.
+    if total_pages > AZURE_FORCE_SPLIT_PAGES:
+        _log(f"[Azure] PDF de {total_pages} págs. > umbral {AZURE_FORCE_SPLIT_PAGES}. "
+             f"Partiendo EN PARALELO desde el inicio.")
+        return _split_and_analyze_parallel(file_bytes, model, pages_per_chunk)
+
+    # PDF chico (pocas páginas): un solo intento directo.
     try:
-        _log("[Azure] Intentando analizar PDF completo...")
+        _log("[Azure] PDF chico. Intentando analizar PDF completo...")
         result = _analyze_single_pdf_bytes(file_bytes, model=model)
         _log("[Azure] PDF completo analizado correctamente.")
+        write_progress(40, "Azure terminó la lectura", "documento leído")
         return result
 
     except Exception as e:
@@ -301,47 +390,6 @@ def analyze_pdf_with_auto_split(file_bytes: bytes, model: str = "prebuilt-layout
         _log(f"[Azure] Error analizando PDF completo: {error_message}")
         if not _is_size_error(error_message):
             raise
-        _log("[Azure] Azure rechazó el PDF completo por tamaño. Se intentará dividir.")
+        _log("[Azure] Azure rechazó el PDF completo por tamaño. Se dividirá EN PARALELO.")
 
-    current_chunk_size = pages_per_chunk
-
-    while current_chunk_size >= 1:
-        _log(f"[Split] Intentando dividir PDF en bloques de {current_chunk_size} página(s)...")
-        write_progress(20, "Dividiendo el PDF", f"bloques de {current_chunk_size} página(s)")
-
-        chunks = split_pdf_bytes(file_bytes, pages_per_chunk=current_chunk_size)
-
-        partial_results = []
-        failed_due_to_size = False
-
-        for index, chunk_bytes in enumerate(chunks, start=1):
-            try:
-                _log(f"[Azure] Procesando chunk {index}/{len(chunks)} con máximo {current_chunk_size} página(s)...")
-                _log(f"[Azure] Chunk {index} size bytes: {len(chunk_bytes)}")
-                _log(f"[Azure] Chunk {index} sha256: {_sha256(chunk_bytes)}")
-
-                write_progress(20 + int(20 * index / max(len(chunks), 1)), "Azure leyendo el PDF", f"bloque {index} de {len(chunks)}")
-
-                partial_result = _analyze_single_pdf_bytes(chunk_bytes, model=model)
-                partial_results.append(partial_result)
-
-                _log(f"[Azure] Chunk {index}/{len(chunks)} procesado correctamente.")
-
-            except Exception as e:
-                error_message = str(e)
-                _log(f"[Azure] Error procesando chunk {index}/{len(chunks)}: {error_message}")
-
-                if _is_size_error(error_message) and current_chunk_size > 1:
-                    _log("[Azure] Chunk todavía muy grande. Se reducirá el tamaño del bloque.")
-                    failed_due_to_size = True
-                    break
-
-                raise
-
-        if not failed_due_to_size:
-            _log("[Azure] Todos los chunks procesados correctamente. Haciendo merge...")
-            return merge_azure_results(partial_results)
-
-        current_chunk_size = current_chunk_size // 2
-
-    raise Exception("No se pudo procesar el PDF: incluso dividido en bloques mínimos Azure lo rechazó por tamaño.")
+    return _split_and_analyze_parallel(file_bytes, model, pages_per_chunk)
