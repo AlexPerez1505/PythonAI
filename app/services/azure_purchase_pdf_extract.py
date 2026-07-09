@@ -21,6 +21,9 @@ AZURE_API_VERSION = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_API_VERSION", "2024-1
 # Paralelización de bloques (tuneable por .env)
 AZURE_MAX_WORKERS = int(os.getenv("AZURE_MAX_WORKERS", "8"))
 AZURE_PAGES_PER_CHUNK = int(os.getenv("AZURE_PAGES_PER_CHUNK", "10"))
+# Si el PDF tiene MÁS páginas que esto, se parte en paralelo desde el inicio,
+# sin esperar a que Azure lo rechace por tamaño.
+AZURE_FORCE_SPLIT_PAGES = int(os.getenv("AZURE_FORCE_SPLIT_PAGES", "20"))
 
 
 def _log(message: str) -> None:
@@ -103,6 +106,13 @@ def split_pdf_bytes(file_bytes: bytes, pages_per_chunk: int) -> List[bytes]:
         chunks.append(output.getvalue())
 
     return chunks
+
+
+def _count_pdf_pages(file_bytes: bytes) -> int:
+    try:
+        return len(PdfReader(BytesIO(file_bytes)).pages)
+    except Exception:
+        return 0
 
 
 def merge_azure_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -190,28 +200,16 @@ def _analyze_chunks_parallel(chunks: List[bytes], model: str, max_workers: int):
     return results, errors
 
 
-def analyze_pdf_with_auto_split(
-    file_bytes: bytes,
-    model: str = "prebuilt-layout",
-    pages_per_chunk: int = None,
-) -> Dict[str, Any]:
-    if pages_per_chunk is None:
-        pages_per_chunk = AZURE_PAGES_PER_CHUNK
-
-    try:
-        _log("Analizando PDF con Azure Document Intelligence...")
-        return _analyze_single_pdf_bytes(file_bytes, model=model)
-
-    except Exception as e:
-        if not _is_size_error(str(e)):
-            raise
-        _log("Azure rechazó el PDF completo por tamaño. Se dividirá EN PARALELO.")
-
+def _split_and_analyze_parallel(file_bytes: bytes, model: str, pages_per_chunk: int) -> Dict[str, Any]:
+    """
+    Parte el PDF en bloques y los analiza EN PARALELO.
+    Si algún bloque falla por tamaño, reduce el tamaño de bloque a la mitad
+    y reintenta hasta llegar a 1 página por bloque.
+    """
     current_chunk_size = pages_per_chunk
 
     while current_chunk_size >= 1:
         _log(f"Dividiendo en bloques de {current_chunk_size} pág. (paralelo, {AZURE_MAX_WORKERS} workers)...")
-
         chunks = split_pdf_bytes(file_bytes, pages_per_chunk=current_chunk_size)
 
         results, errors = _analyze_chunks_parallel(chunks, model, AZURE_MAX_WORKERS)
@@ -222,9 +220,7 @@ def analyze_pdf_with_auto_split(
             raise other_error
 
         # ¿Algún bloque falló por tamaño? -> partir más chico y reintentar.
-        size_error = any(_is_size_error(str(e)) for e in errors.values())
-
-        if size_error:
+        if any(_is_size_error(str(e)) for e in errors.values()):
             if current_chunk_size > 1:
                 current_chunk_size = current_chunk_size // 2
                 continue
@@ -233,6 +229,36 @@ def analyze_pdf_with_auto_split(
         return merge_azure_results(results)
 
     raise Exception("No se pudo procesar el PDF incluso dividiéndolo en páginas individuales.")
+
+
+def analyze_pdf_with_auto_split(
+    file_bytes: bytes,
+    model: str = "prebuilt-layout",
+    pages_per_chunk: int = None,
+) -> Dict[str, Any]:
+    if pages_per_chunk is None:
+        pages_per_chunk = AZURE_PAGES_PER_CHUNK
+
+    total_pages = _count_pdf_pages(file_bytes)
+
+    # Si el PDF es grande en PÁGINAS, partimos EN PARALELO desde el inicio.
+    # No esperamos a que Azure lo rechace por tamaño: un solo job de muchas
+    # páginas es lento aunque el archivo pese poco.
+    if total_pages > AZURE_FORCE_SPLIT_PAGES:
+        _log(f"PDF de {total_pages} págs. > umbral {AZURE_FORCE_SPLIT_PAGES}. "
+             f"Partiendo EN PARALELO desde el inicio.")
+        return _split_and_analyze_parallel(file_bytes, model, pages_per_chunk)
+
+    # PDF chico (pocas páginas): un solo intento directo.
+    try:
+        _log("Analizando PDF con Azure Document Intelligence...")
+        return _analyze_single_pdf_bytes(file_bytes, model=model)
+    except Exception as e:
+        if not _is_size_error(str(e)):
+            raise
+        _log("Azure rechazó el PDF por tamaño. Se dividirá EN PARALELO.")
+
+    return _split_and_analyze_parallel(file_bytes, model, pages_per_chunk)
 
 
 # ---------------------------------------------------------------------------
