@@ -660,139 +660,175 @@ LICITACION_SYSTEM_PROMPT = (
 
 
 def _build_licitacion_prompt(raw_text: str) -> str:
-    compact = (raw_text or "")[:90000]
+    compact = (raw_text or "")[:140000]
 
     return f"""
-Analiza el texto de esta licitacion y devuelve UN SOLO JSON valido con esta estructura exacta:
+Analiza EXCLUSIVAMENTE el texto de los documentos proporcionados y devuelve UN SOLO JSON válido.
 
+ESTRUCTURA OBLIGATORIA:
 {{
   "ficha": {{
-    "numero_licitacion": "...",
-    "tipo_evento": "...",
-    "organismo": "...",
-    "objeto_licitacion": "...",
-    "medio_participacion": "...",
-    "moneda_pago": "...",
-    "condiciones_pago": "..."
+    "numero_licitacion": "",
+    "tipo_evento": "",
+    "organismo": "",
+    "objeto_licitacion": "",
+    "medio_participacion": "",
+    "moneda_pago": "",
+    "condiciones_pago": ""
   }},
   "fechas_clave": {{
-    "fecha_publicacion": "...",
-    "junta_aclaraciones": "...",
-    "presentacion_apertura": "...",
-    "fallo": "...",
-    "vigencia_contrato": "..."
+    "fecha_publicacion": "",
+    "junta_aclaraciones": "",
+    "presentacion_apertura": "",
+    "fallo": "",
+    "vigencia_contrato": ""
   }},
   "resumen_ejecutivo": [
-    {{"pregunta": "Cuanto tiempo tengo para implementar?", "respuesta": "..."}},
-    {{"pregunta": "Es necesario demostrar experiencia previa o acreditar experiencia?", "respuesta": "..."}},
-    {{"pregunta": "Se mencionan penas convencionales, multas, deducciones u otras sanciones en caso de incumplimiento?", "respuesta": "..."}},
-    {{"pregunta": "Cual es el periodo de garantia a ofertar?", "respuesta": "..."}},
-    {{"pregunta": "Cual es el sistema de evaluacion?", "respuesta": "..."}},
-    {{"pregunta": "Se requieren cartas de apoyo?", "respuesta": "..."}},
-    {{"pregunta": "Se deben entregar muestras fisicas?", "respuesta": "..."}},
-    {{"pregunta": "Es necesario entregar documentacion regulatoria?", "respuesta": "..."}},
-    {{"pregunta": "A que hospitales o instituciones se deben entregar los productos o prestar los servicios?", "respuesta": "..."}},
-    {{"pregunta": "Existe subrogacion en caso de fallas del equipo?", "respuesta": "..."}},
-    {{"pregunta": "Se requiere la documentacion tecnica en espanol o se permiten traducciones simples?", "respuesta": "..."}},
-    {{"pregunta": "Como se realiza la adjudicacion?", "respuesta": "..."}},
-    {{"pregunta": "Se menciona si el evento esta bajo tratados de libre comercio?", "respuesta": "..."}},
-    {{"pregunta": "Cual es la vigencia o duracion del contrato?", "respuesta": "..."}},
-    {{"pregunta": "Cuales son los plazos de entrega y las condiciones para cumplir con las entregas?", "respuesta": "..."}},
-    {{"pregunta": "Es necesario realizar una visita a las instalaciones de la convocante?", "respuesta": "..."}}
+    {{"pregunta": "¿Cuánto tiempo tengo para implementar?", "respuesta": ""}},
+    {{"pregunta": "¿Es necesario demostrar experiencia previa o acreditar experiencia?", "respuesta": ""}},
+    {{"pregunta": "¿Se mencionan penas convencionales, multas, deducciones u otras sanciones en caso de incumplimiento?", "respuesta": ""}},
+    {{"pregunta": "¿Cuál es el periodo de garantía a ofertar?", "respuesta": ""}},
+    {{"pregunta": "¿Cuál es el sistema de evaluación?", "respuesta": ""}},
+    {{"pregunta": "¿Se requieren cartas de apoyo?", "respuesta": ""}},
+    {{"pregunta": "¿Se deben entregar muestras físicas?", "respuesta": ""}},
+    {{"pregunta": "¿Es necesario entregar documentación regulatoria?", "respuesta": ""}},
+    {{"pregunta": "¿A qué hospitales o instituciones se deben entregar los productos o prestar los servicios?", "respuesta": ""}},
+    {{"pregunta": "¿Existe subrogación en caso de fallas del equipo?", "respuesta": ""}},
+    {{"pregunta": "¿Se requiere la documentación técnica en español o se permiten traducciones simples?", "respuesta": ""}},
+    {{"pregunta": "¿Cómo se realiza la adjudicación?", "respuesta": ""}},
+    {{"pregunta": "¿Se menciona si el evento está bajo tratados de libre comercio?", "respuesta": ""}},
+    {{"pregunta": "¿Cuál es la vigencia o duración del contrato?", "respuesta": ""}},
+    {{"pregunta": "¿Cuáles son los plazos de entrega y las condiciones para cumplir con las entregas?", "respuesta": ""}},
+    {{"pregunta": "¿Es necesario realizar una visita a las instalaciones de la convocante?", "respuesta": ""}}
   ],
+  "eventos": {{
+    "comentarios": "",
+    "vigencias": [
+      {{"label": "", "risk": "NULO", "value": "", "fuente": "", "pagina": null, "cita": ""}}
+    ],
+    "plazos_ejecucion": [
+      {{"label": "", "risk": "NULO", "value": "", "fuente": "", "pagina": null, "cita": ""}}
+    ]
+  }},
+  "matriz": {{
+    "comentarios": "",
+    "secciones": [
+      {{
+        "title": "",
+        "icons": ["yellow"],
+        "items": [
+          {{
+            "question": "",
+            "risk": "NULO",
+            "answer": "",
+            "justificacion": "",
+            "citas": [""],
+            "fuente": "",
+            "pagina": null
+          }}
+        ]
+      }}
+    ]
+  }},
+  "financiero": {{
+    "comentarios": "",
+    "secciones": [
+      {{
+        "title": "",
+        "icons": ["yellow"],
+        "items": [
+          {{
+            "question": "",
+            "risk": "NULO",
+            "answer": "",
+            "justificacion": "",
+            "citas": [""],
+            "fuente": "",
+            "pagina": null
+          }}
+        ]
+      }}
+    ]
+  }},
+  "alcance": {{
+    "comentarios": "",
+    "partidas": [
+      {{
+        "numero": 1,
+        "titulo": "",
+        "descripcion": "",
+        "unidad": "",
+        "cantidad": 0,
+        "estado": "MATCH",
+        "observaciones": "",
+        "fuente": "",
+        "pagina": null,
+        "cita": ""
+      }}
+    ]
+  }},
+  "observaciones": {{
+    "secciones": [
+      {{
+        "title": "",
+        "items": [
+          {{
+            "title": "",
+            "text": "",
+            "quote": "",
+            "source": "",
+            "page": null
+          }}
+        ]
+      }}
+    ]
+  }},
   "partidas": [
-    {{"numero": 1, "descripcion": "...", "unidad": "...", "cantidad": 0}}
+    {{"numero": 1, "descripcion": "", "unidad": "", "cantidad": 0, "fuente": "", "pagina": null, "cita": ""}}
   ],
   "checklist_sugerido": [
     {{
-      "requisito": "Nombre del requisito a presentar",
-      "descripcion": "Detalle de que debe contener el documento",
-      "criterio_cumplimiento": "Que se necesita exactamente para considerar CUMPLIDO este requisito segun el PDF (condiciones, formato, vigencia, firmas, plazos, contenido)",
+      "requisito": "",
+      "descripcion": "",
+      "criterio_cumplimiento": "",
       "formato": "No aplica",
       "categoria": "Legal-Administrativo",
-      "aplicabilidad": "Unico",
-      "obligatorio": "Si",
+      "aplicabilidad": "Único",
+      "obligatorio": "Sí",
       "cumplimiento": "-",
       "status": "Pendiente",
       "prioridad": "Media",
-      "fuente": "INV.pdf",
-      "pagina": 1,
-      "cita": "texto literal del documento que respalda el requisito"
+      "fuente": "",
+      "pagina": null,
+      "cita": ""
     }}
   ],
-  "citas": {{
-    "ficha.numero_licitacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "ficha.tipo_evento": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "ficha.organismo": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "ficha.objeto_licitacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "ficha.medio_participacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "ficha.moneda_pago": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "ficha.condiciones_pago": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "fechas_clave.fecha_publicacion": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "fechas_clave.junta_aclaraciones": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "fechas_clave.presentacion_apertura": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "fechas_clave.fallo": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "fechas_clave.vigencia_contrato": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.0": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.1": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.2": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.3": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.4": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.5": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.6": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.7": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.8": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.9": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.10": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.11": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.12": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.13": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.14": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}},
-    "resumen_ejecutivo.15": {{"cita": "texto exacto del documento", "fuente": "INV.pdf", "pagina": 1}}
-  }}
+  "citas": {{}}
 }}
 
-Reglas obligatorias:
-- Responde SOLO JSON valido.
-- No uses markdown.
-- No inventes datos.
-- Si un dato no se encuentra, usa exactamente "No se encontro informacion".
-- Las fechas deben ir en formato dd/mm/aaaa cuando sea posible.
-- En resumen_ejecutivo responde cada pregunta basandote SOLO en el texto.
-- En resumen_ejecutivo DEBES devolver EXACTAMENTE las 16 preguntas listadas arriba, en ese mismo orden, sin agregar, quitar, reordenar ni reformular ninguna. Son 16 objetos, ni mas ni menos.
-- Si una pregunta no aplica o no esta en el documento, igual incluyela con respuesta "No se encontro informacion".
-- Las partidas son los items, productos o servicios solicitados.
-- En "citas" pon texto LITERAL del documento que respalda cada campo.
-- Cada cita debe tener maximo 350 caracteres.
-- El campo "fuente" debe ser el nombre EXACTO del archivo que aparece en el encabezado "--- DOCUMENTO: nombre.pdf ---".
-- El campo "pagina" debe tomarse de la marca [PAGINA X] mas cercana antes del texto citado.
-- Para cada campo de "ficha" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas".
-- En "ficha.moneda_pago" busca especificamente "moneda nacional", "pesos mexicanos", "MXN", "dólares" o el apartado "Condiciones y formas de pago".
-- En "ficha.condiciones_pago" extrae el texto del apartado "CONDICIONES Y FORMAS DE PAGO" o el parrafo donde se explique cuándo y cómo se pagará.
-- Para cada campo de "fechas_clave" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas".
-- Para cada respuesta de "resumen_ejecutivo" que NO sea "No se encontro informacion", es OBLIGATORIO crear su entrada correspondiente en "citas" (resumen_ejecutivo.0 hasta resumen_ejecutivo.15 segun el indice de la pregunta).
-- Solo omite una entrada de "citas" cuando el valor sea exactamente "No se encontro informacion".
-- La cita debe ser un fragmento literal del documento, no una explicacion.
-- Si el dato aparece en varias paginas, usa la cita mas directa y especifica.
+REGLAS CRÍTICAS:
+- Devuelve SOLO JSON válido, sin markdown.
+- Usa únicamente el contenido situado después de cada encabezado "--- DOCUMENTO: nombre ---".
+- No inventes, no completes con conocimiento general y no reutilices datos de otras licitaciones.
+- Cuando un dato no esté explícito usa exactamente "No se encontró información".
+- El nombre de fuente debe coincidir EXACTAMENTE con el encabezado del documento.
+- La página debe tomarse de la marca [PAGINA X] anterior a la evidencia.
+- Toda respuesta distinta de "No se encontró información" debe tener cita literal, fuente y página.
+- Los riesgos permitidos son: ALTO, MEDIO, BAJO y NULO.
+- En matriz.secciones analiza requisitos generales, legales, administrativos, técnicos, contractuales, garantías, sanciones, evaluación y causas de desechamiento.
+- En financiero.secciones analiza capacidad financiera, pago, facturación, anticipos, retenciones, fianzas, garantías, penas y deducciones.
+- En eventos extrae únicamente vigencias y plazos reales.
+- En observaciones detecta solo contradicciones, ambigüedades, requisitos restrictivos, posibles candados, fechas incompatibles o condiciones inusuales sustentadas textualmente.
+- No generes observaciones si no existe evidencia suficiente.
+- En alcance.partidas incluye todos los bienes o servicios solicitados. No inventes cantidades.
+- Genera entre 20 y 50 requisitos de checklist cuando el documento lo permita.
+- resumen_ejecutivo debe contener exactamente las 16 preguntas indicadas y en el mismo orden.
+- Para cada valor de ficha, fechas_clave y resumen_ejecutivo crea una entrada en citas con clave como "ficha.numero_licitacion", "fechas_clave.fallo" o "resumen_ejecutivo.0".
+- Cada cita literal debe tener máximo 350 caracteres.
 
-Reglas del checklist:
-- Genera ENTRE 20 Y 50 requisitos detectados en el documento.
-- Cubre todas las categorias: legales, administrativos, tecnicos, anexos requeridos, escritos bajo protesta, garantias, opiniones SAT/IMSS/INFONAVIT, fianzas, fichas tecnicas, etc.
-- "formato" usa uno de: "No aplica", "Anexo A", "Anexo B / Plataforma", "Anexo C", "Anexo D", "Formatos de la convocatoria".
-- "categoria" usa uno de: "Legal-Administrativo", "Tecnico", "Otro / Tecnico", "Otro".
-- "aplicabilidad" usa: "Unico" o "Por partida".
-- "obligatorio" siempre "Si", excepto opcionales claramente marcados.
-- "cumplimiento" siempre arranca en "-".
-- "status" siempre arranca en "Pendiente".
-- "prioridad": "Alta" para legal obligatorio, "Media" para tecnico comun, "Baja" para anexos secundarios.
-- Cada item de checklist_sugerido debe incluir "fuente", "pagina" y "cita".
-- Cada item de checklist_sugerido debe incluir "criterio_cumplimiento": una frase clara de QUE se necesita para marcar el requisito como CUMPLIDO segun lo que pide el PDF (por ejemplo: documento vigente, firmado, en original, dentro de cierto plazo, con cierto contenido). Nunca lo dejes vacio; si el PDF no detalla el criterio, infiere el criterio minimo razonable a partir del requisito.
-- "cita" en checklist_sugerido debe ser texto literal del documento.
-
-Texto de la licitacion:
+TEXTO DE LOS DOCUMENTOS:
 {compact}
 """.strip()
-
 
 def _get_openai_models() -> List[str]:
     """
@@ -968,10 +1004,19 @@ def process_files(file_paths: List[str], include_raw: bool = False) -> Dict[str,
 
             if content:
                 combined_parts.append(f"--- DOCUMENTO: {name} ---\n{content}")
+                page_numbers = [
+                    int(n) for n in re.findall(r"\[PAGINA\s+(\d+)\]", content, flags=re.IGNORECASE)
+                ]
                 documents_info.append({
                     "file": name,
                     "status": "ok",
                     "text_length": len(content),
+                    "extracted_text": content,
+                    "extracted_raw": {
+                        "pages_count": max(page_numbers) if page_numbers else None,
+                        "pages": page_numbers,
+                        "summary": _clean_extracted_value(content, 1200),
+                    },
                     "raw_preview": _clean_extracted_value(content, 1200),
                 })
             else:
@@ -1018,8 +1063,7 @@ def process_files(file_paths: List[str], include_raw: bool = False) -> Dict[str,
         "documents": documents_info,
     }
 
-    if include_raw:
-        output["raw_text_combined"] = combined_text
+    output["raw_text_combined"] = combined_text
 
     return output
 
