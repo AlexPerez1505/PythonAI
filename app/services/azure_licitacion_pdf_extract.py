@@ -714,18 +714,39 @@ ESTRUCTURA OBLIGATORIA:
     "comentarios": "",
     "secciones": [
       {{
-        "title": "",
+        "title": "Requisitos general",
         "icons": ["yellow"],
         "items": [
-          {{
-            "question": "",
-            "risk": "NULO",
-            "answer": "",
-            "justificacion": "",
-            "citas": [""],
-            "fuente": "",
-            "pagina": null
-          }}
+          {{"question": "¿En qué Entidad(es) Federativa(s) o estado(s) se realizará el servicio o entrega de bienes?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿A qué Unidades Requirientes (ej. hospitales, clínicas, almacenes específicos) se deben entregar los productos o prestar los servicios?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Tienen algún costo las bases de participación?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Qué tipo de contrato se celebrará (abierto, cerrado, mixto)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+        ]
+      }},
+      {{
+        "title": "Requisitos legal financiero",
+        "icons": ["yellow"],
+        "items": [
+          {{"question": "¿Se menciona explícitamente si el evento está bajo la cobertura de algún Tratado de Libre Comercio?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Se exige estar dado de alta en algún padrón de proveedores específico o contar con cédula de proveedor vigente?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Cuáles son las condiciones o restricciones explícitas para subcontratar/subrogar?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Se requiere demostrar capacidad financiera (ej. declaraciones anuales, estados financieros, capital contable)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Se exige acreditar experiencia previa (ej. presentación de contratos similares, currículum de la empresa)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Cuáles son las causas explícitas de desechamiento o descalificación de la propuesta?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Qué tipos y periodos de garantías se solicitan presentar (ej. garantía de cumplimiento, de anticipo, de los bienes/vicios ocultos)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Solicitan o exigen presentar póliza de responsabilidad civil?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+        ]
+      }},
+      {{
+        "title": "Requisitos técnicos",
+        "icons": ["yellow"],
+        "items": [
+          {{"question": "¿Bajo qué condición se exigen los bienes a entregar (ej. nuevos, originales, de modelo reciente, sin uso)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Se exige algún origen específico (país de fabricación) para los productos ofertados?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Qué grado mínimo de contenido o integración nacional se exige?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Cómo se debe certificar o acreditar el cumplimiento de las Normas Oficiales Mexicanas (NOMs)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Se deben entregar muestras físicas de los productos como parte de la propuesta técnica?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+          {{"question": "¿Existe cláusula de subrogación obligatoria en caso de fallas del equipo?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
         ]
       }}
     ]
@@ -733,21 +754,29 @@ ESTRUCTURA OBLIGATORIA:
   "financiero": {{
     "comentarios": "",
     "secciones": [
-      {{
-        "title": "",
-        "icons": ["yellow"],
-        "items": [
-          {{
-            "question": "",
-            "risk": "NULO",
-            "answer": "",
-            "justificacion": "",
-            "citas": [""],
-            "fuente": "",
-            "pagina": null
-          }}
-        ]
-      }}
+      {{"title": "Capacidad Financiera", "icons": ["yellow"], "items": [
+        {{"question": "¿Se exige acreditar capacidad financiera (capital contable mínimo, estados financieros, declaraciones anuales)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+        {{"question": "¿Cuál es el capital contable, ingresos o monto mínimo exigido para participar?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+      ]}},
+      {{"title": "Condiciones de Pago", "icons": ["yellow"], "items": [
+        {{"question": "¿Cuáles son las condiciones y plazos de pago (días naturales tras entrega o factura)?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+        {{"question": "¿Se otorga anticipo y de qué porcentaje?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+      ]}},
+      {{"title": "Garantías y Fianzas", "icons": ["yellow"], "items": [
+        {{"question": "¿Qué garantías o fianzas se solicitan (seriedad, cumplimiento, anticipo, vicios ocultos) y sus porcentajes?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+        {{"question": "¿Ante qué afianzadora y a favor de quién deben expedirse las garantías?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+      ]}},
+      {{"title": "Penas y Deductivas", "icons": ["yellow"], "items": [
+        {{"question": "¿Qué penas convencionales y deductivas aplican por atraso o incumplimiento?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+        {{"question": "¿Cuál es el tope máximo de penalización antes de la rescisión del contrato?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+      ]}},
+      {{"title": "Seguros", "icons": ["yellow"], "items": [
+        {{"question": "¿Se exige póliza de responsabilidad civil u otros seguros durante la vigencia del contrato?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+      ]}},
+      {{"title": "Precios y Moneda", "icons": ["yellow"], "items": [
+        {{"question": "¿En qué moneda se cotiza y paga (M.N., USD) y los precios son fijos o ajustables?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}},
+        {{"question": "¿Cómo se maneja el IVA y la estructura de precios unitarios?", "risk": "NULO", "answer": "", "justificacion": "", "citas": [""], "fuente": "", "pagina": null}}
+      ]}}
     ]
   }},
   "alcance": {{
@@ -815,8 +844,8 @@ REGLAS CRÍTICAS:
 - La página debe tomarse de la marca [PAGINA X] anterior a la evidencia.
 - Toda respuesta distinta de "No se encontró información" debe tener cita literal, fuente y página.
 - Los riesgos permitidos son: ALTO, MEDIO, BAJO y NULO.
-- En matriz.secciones analiza requisitos generales, legales, administrativos, técnicos, contractuales, garantías, sanciones, evaluación y causas de desechamiento.
-- En financiero.secciones analiza capacidad financiera, pago, facturación, anticipos, retenciones, fianzas, garantías, penas y deducciones.
+- En matriz.secciones RESPETA EXACTAMENTE las 3 secciones y las 18 preguntas de la plantilla (no cambies, no elimines ni agregues preguntas ni secciones). Solo llena "answer", "risk" (ALTO/MEDIO/BAJO/NULO), "justificacion", "citas", "fuente" y "pagina" con base en el documento. Si no se encuentra, answer="No se encontró información" y risk="NULO".
+- En financiero.secciones RESPETA EXACTAMENTE las 6 secciones y las preguntas de la plantilla (no cambies, no elimines ni agregues). Solo llena "answer", "risk", "justificacion", "citas", "fuente" y "pagina". Si no se encuentra, answer="No se encontró información" y risk="NULO".
 - En eventos extrae únicamente vigencias y plazos reales.
 - En observaciones detecta solo contradicciones, ambigüedades, requisitos restrictivos, posibles candados, fechas incompatibles o condiciones inusuales sustentadas textualmente.
 - No generes observaciones si no existe evidencia suficiente.
@@ -1059,7 +1088,9 @@ def process_files(file_paths: List[str], include_raw: bool = False) -> Dict[str,
 
     output = {
         "ok": True,
+        # Se conservan ambas claves para compatibilidad con Laravel antiguo y nuevo.
         "structured": structured,
+        "structured_data": structured,
         "documents": documents_info,
     }
 
