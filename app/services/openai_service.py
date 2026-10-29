@@ -23,6 +23,8 @@ OPENAI_CORRECT_MAX_WORKERS = int(os.getenv("OPENAI_CORRECT_MAX_WORKERS", "4"))
 OPENAI_CORRECT_ITEMS = os.getenv("OPENAI_CORRECT_ITEMS", "1") == "1"
 OPENAI_CORRECT_TIMEOUT = int(os.getenv("OPENAI_CORRECT_TIMEOUT", "45"))
 OPENAI_MAX_CANDIDATES_FOR_AI = int(os.getenv("OPENAI_MAX_CANDIDATES_FOR_AI", "240"))
+OPENAI_EXTRACT_CHUNK_ROWS = int(os.getenv("OPENAI_EXTRACT_CHUNK_ROWS", "60"))
+OPENAI_MAX_ROWS_FOR_AI = int(os.getenv("OPENAI_MAX_ROWS_FOR_AI", "2000"))
 OPENAI_STRUCTURE_WITH_AI = os.getenv("OPENAI_STRUCTURE_WITH_AI", "0") == "1"
 
 
@@ -636,6 +638,165 @@ Devuelve exactamente:
 """
 
 
+_PROMPT_EXTRACT_TABLE_ROWS = """
+Eres un analista de licitaciones de gobierno en México. Recibes renglones de tablas leídas por Azure
+Document Intelligence (OCR). Cada renglón viene como celdas separadas por " | " y trae su índice "r".
+Tu tarea: devolver TODAS las partidas (bienes o servicios que se solicitan cotizar) que aparezcan en esos renglones.
+
+CÓMO LEER LA TABLA:
+- Primero identifica qué columna es qué usando el encabezado. Si el bloque no trae encabezado
+  (la tabla continúa en otra página), usa el encabezado de referencia que se te da.
+- Las columnas típicas son: partida/número, clave, nombre o descripción del bien, unidad de medida (U.M.),
+  cantidad (o mínima/máxima), y observaciones/especificaciones.
+- descripcion = el texto de la columna del NOMBRE / DESCRIPCIÓN del bien, aunque sea corto o de una
+  sola palabra (BICOLOR, DESENGRAPADORA, CUTTER). NUNCA uses como descripción el texto de observaciones,
+  aunque sea más largo.
+- especificaciones = el texto de observaciones/especificaciones técnicas de ese mismo renglón (o null).
+- El encabezado de la tabla (PARTIDA, NOMBRE, U.M., CANTIDAD ESTIMADA, OBSERVACIONES, etc.) NO es partida.
+- Títulos de sección, totales, firmas, fechas, domicilios, notas e instrucciones NO son partidas.
+
+COMPLETITUD (lo más importante):
+- Devuelve una partida por cada renglón que tenga un bien o servicio. No omitas ninguna, ni siquiera
+  si se parece a otra, se repite o tiene la misma cantidad que otra.
+- Si el OCR partió un mismo renglón en dos (por ejemplo la descripción quedó en un renglón y el número,
+  unidad y cantidad en el siguiente), únelos en una sola partida.
+- No inventes partidas que no estén en los renglones.
+- En "r" pon el índice del renglón de donde sale la partida (el del número de partida si se unieron varios).
+
+DESCRIPCIÓN Y UNIDAD:
+- Corrige errores leves de OCR sin cambiar el significado del bien.
+- Si la descripción trae la presentación entre paréntesis (CAJA CON 50 PIEZAS), quítala de descripcion
+  y úsala para la unidad.
+- unidad: usa la columna de unidad. Normaliza a PIEZA, PAQUETE, CAJA, BOLSA, FRASCO, BOTELLA, ROLLO,
+  JUEGO, KIT, SERVICIO u otra unidad comercial si es la que pide la tabla.
+
+CANTIDAD:
+- cantidad = la cantidad solicitada de la partida. No confundas las piezas de la presentación
+  (CAJA CON 12 PIEZAS) con la cantidad solicitada.
+- Si hay mínima y máxima, llena cantidad_minima y cantidad_maxima.
+- cantidad_cotizada = cantidad_minima si existe; si no, cantidad; si no, cantidad_maxima; si no, 1.
+
+PARTIDA:
+- partida = el número de partida tal como viene. Si viene 2.15, partida=2 y subpartida=15.
+- clave = clave CUCOP/CABMS u otra clave del bien si existe una columna para ello; si no, null.
+- muestra = "Si" o "No" solo si hay una columna que lo indique; si no, null.
+
+Responde SOLO JSON válido, sin markdown, con exactamente esta forma:
+{
+  "items": [
+    {
+      "r": 0, "partida": null, "subpartida": null, "clave": null,
+      "descripcion": "", "especificaciones": null, "unidad": "",
+      "cantidad": null, "cantidad_minima": null, "cantidad_maxima": null,
+      "cantidad_cotizada": null, "muestra": null
+    }
+  ]
+}
+Si en los renglones no hay ninguna partida, devuelve {"items": []}.
+"""
+
+
+def _openai_extract_rows_chunk(header_ref: List[str], rows: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    """Pide a la IA las partidas de un bloque de renglones. None si la IA falló."""
+    try:
+        user = (
+            "Inicio de la primera tabla con estas mismas columnas (normalmente el encabezado; "
+            "si son datos, también cuentan solo como referencia, no los devuelvas si no están en los renglones):\n"
+            + ("\n".join(header_ref) if header_ref else "(sin encabezado)")
+            + "\n\nRenglones:\n"
+            + "\n".join(f'r={row["r"]}: {row["text"]}' for row in rows)
+        )
+        data = _responses_json(_PROMPT_EXTRACT_TABLE_ROWS, user, timeout=OPENAI_CORRECT_TIMEOUT * 3)
+        items = data.get("items")
+        return items if isinstance(items, list) else []
+    except Exception as e:
+        _log(f"[extract_rows] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}")
+        return None
+
+
+def _table_rows_for_ai(raw_analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Aplana todas las tablas en renglones de texto con índice global y su tabla."""
+    rows = []
+    for table_index, table in enumerate(raw_analyze_result.get("tables", []) or []):
+        for row in _build_table_matrix(table):
+            cells = [(c or "").strip() for c in row]
+            if not any(cells):
+                continue
+            rows.append({
+                "r": len(rows),
+                "table": table_index,
+                "cells": cells,
+                "text": " | ".join(cells),
+            })
+    return rows
+
+
+def _extract_items_with_ai_from_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    La IA lee los renglones de las tablas con su encabezado y decide qué es partida y qué columna es
+    la descripción. Si un bloque falla, ese bloque cae al parser local.
+    """
+    chunk_size = max(1, OPENAI_EXTRACT_CHUNK_ROWS)
+
+    # Azure marca como encabezado el primer renglón de cada tabla aunque sea un dato (tablas que siguen
+    # en otra página). Como referencia se manda el inicio de la primera tabla con el mismo número de
+    # columnas, y la IA decide si es encabezado.
+    header_by_cols: Dict[int, List[str]] = {}
+    for row in rows:
+        cols = len(row["cells"])
+        if cols not in header_by_cols:
+            header_by_cols[cols] = [r["text"] for r in rows if r["table"] == row["table"]][:2]
+
+    chunks: List[Tuple[List[str], List[Dict[str, Any]]]] = []
+    current: List[Dict[str, Any]] = []
+    for row in rows:
+        if current and (len(current) >= chunk_size or len(current[0]["cells"]) != len(row["cells"])):
+            chunks.append((header_by_cols[len(current[0]["cells"])], current))
+            current = []
+        current.append(row)
+    if current:
+        chunks.append((header_by_cols[len(current[0]["cells"])], current))
+
+    total = len(chunks)
+    _log(f"[extract_rows] {len(rows)} renglones de tabla → {total} bloque(s) para '{OPENAI_MODEL}'")
+    write_progress(55, "Leyendo partidas con IA", f"{total} bloque(s) en paralelo")
+
+    results: List[Optional[List[Dict[str, Any]]]] = [None] * total
+    done = 0
+    workers = max(1, min(OPENAI_CORRECT_MAX_WORKERS, total))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_openai_extract_rows_chunk, header, chunk): idx for idx, (header, chunk) in enumerate(chunks)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as e:
+                _log(f"[extract_rows] Bloque {idx + 1} falló: {e}")
+            done += 1
+            write_progress(55 + int(35 * done / total), "Leyendo partidas con IA", f"bloque {done} de {total}")
+
+    items: List[Dict[str, Any]] = []
+    for idx, res in enumerate(results):
+        if res is None:
+            _log(f"[extract_rows] Bloque {idx + 1} sin IA: se usa el parser local para esos renglones.")
+            seq = len(items)
+            for row in chunks[idx][1]:
+                candidate = _row_to_azure_candidate(row["cells"], seq + 1)
+                if candidate:
+                    seq += 1
+                    candidate["_r"] = row["r"]
+                    items.append(candidate)
+            continue
+        for it in res:
+            if isinstance(it, dict):
+                it["_r"] = it.get("r")
+                it["_ai"] = True
+                items.append(it)
+
+    items.sort(key=lambda it: it.get("_r") if isinstance(it.get("_r"), int) else 10 ** 9)
+    return items
+
+
 def _openai_correct_items_chunk(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     try:
         data = _responses_json(
@@ -661,7 +822,8 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
         desc = _normalize_text(it.get("descripcion") or it.get("nombre") or it.get("producto") or it.get("description"))
         if not desc:
             continue
-        if not _looks_like_product_description(desc):
+        # Lo que la IA ya leyó como partida no pasa por el filtro de palabras: tiraba productos reales.
+        if not it.get("_ai") and not _looks_like_product_description(desc):
             _log(f"[extract_items] Omitiendo basura/no-producto: {desc}")
             continue
         clave = _normalize_text(it.get("clave"))
@@ -680,13 +842,18 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
             else:
                 cantidad_cotizada = 1
         unidad = _normalize_text(it.get("unidad") or it.get("unit") or it.get("unidad_solicitada")) or "PIEZA"
-        desc, unidad = _extract_unit_and_clean_description(desc, unidad)
-        key = ((clave or ""), desc.lower()[:180], str(cant or ""), str(cantidad_minima or ""), str(cantidad_maxima or ""), (sub or ""))
+        if it.get("_ai"):
+            # La IA ya tomó la unidad de su columna; inferirla del texto ponía CAJA a "BLOCK VALE DE CAJA".
+            unidad = unidad.upper()
+        else:
+            desc, unidad = _extract_unit_and_clean_description(desc, unidad)
+        partida = _normalize_number(it.get("partida"))
+        # La partida va en la llave: dos partidas distintas con el mismo texto y cantidad son dos partidas.
+        key = (str(partida or ""), (clave or ""), desc.lower()[:180], str(cant or ""), str(cantidad_minima or ""), str(cantidad_maxima or ""), (sub or ""))
         if key in seen:
             continue
         seen.add(key)
         seq += 1
-        partida = _normalize_number(it.get("partida"))
         muestra = _normalize_text(it.get("muestra") or it.get("presentar_muestra"))
         if muestra:
             m = muestra.lower()
@@ -698,6 +865,7 @@ def _sanitize_extracted_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any
             "clave": clave,
             "descripcion": desc,
             "nombre": desc,
+            "especificaciones": _normalize_text(it.get("especificaciones")),
             "unidad": unidad,
             "cantidad": cant,
             "cantidad_minima": cantidad_minima,
@@ -712,7 +880,16 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
     tables = raw_analyze_result.get("tables", []) or []
 
     _log(f"[extract_items] Tablas detectadas por Azure: {len(tables)}")
-    _log("[extract_items] Azure/parser local extraen candidatos; OpenAI solo corrige.")
+
+    rows = _table_rows_for_ai(raw_analyze_result)
+    if OPENAI_API_KEY and OPENAI_CORRECT_ITEMS and rows and len(rows) <= OPENAI_MAX_ROWS_FOR_AI:
+        write_progress(50, "Leyendo partidas de las tablas", f"{len(rows)} renglones encontrados")
+        sanitized = _sanitize_extracted_items(_extract_items_with_ai_from_rows(rows))
+        _log(f"[extract_items] Items finales (IA sobre renglones de tabla): {len(sanitized)}")
+        write_progress(95, "Limpiando y validando partidas", f"{len(sanitized)} partidas listas")
+        return {"items_count": len(sanitized), "items": sanitized}
+
+    _log("[extract_items] Sin IA para renglones: Azure/parser local extraen candidatos; OpenAI solo corrige.")
 
     azure_candidates = _extract_candidates_from_azure_tables(raw_analyze_result)
     _log(f"[extract_items] Candidatos extraídos desde Azure/parser local: {len(azure_candidates)}")
