@@ -696,22 +696,25 @@ Si en los renglones no hay ninguna partida, devuelve {"items": []}.
 """
 
 
-def _openai_extract_rows_chunk(header_ref: List[str], rows: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
-    """Pide a la IA las partidas de un bloque de renglones. None si la IA falló."""
-    try:
-        user = (
-            "Inicio de la primera tabla con estas mismas columnas (normalmente el encabezado; "
-            "si son datos, también cuentan solo como referencia, no los devuelvas si no están en los renglones):\n"
-            + ("\n".join(header_ref) if header_ref else "(sin encabezado)")
-            + "\n\nRenglones:\n"
-            + "\n".join(f'r={row["r"]}: {row["text"]}' for row in rows)
-        )
-        data = _responses_json(_PROMPT_EXTRACT_TABLE_ROWS, user, timeout=OPENAI_CORRECT_TIMEOUT * 3)
-        items = data.get("items")
-        return items if isinstance(items, list) else []
-    except Exception as e:
-        _log(f"[extract_rows] ERROR OpenAI con modelo '{OPENAI_MODEL}': {e}")
-        return None
+def _openai_extract_rows_chunk(header_ref: List[str], rows: List[Dict[str, Any]]) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Pide a la IA las partidas de un bloque de renglones. Devuelve (items, None) o (None, error)."""
+    user = (
+        "Inicio de la primera tabla con estas mismas columnas (normalmente el encabezado; "
+        "si son datos, también cuentan solo como referencia, no los devuelvas si no están en los renglones):\n"
+        + ("\n".join(header_ref) if header_ref else "(sin encabezado)")
+        + "\n\nRenglones:\n"
+        + "\n".join(f'r={row["r"]}: {row["text"]}' for row in rows)
+    )
+    error = None
+    for intento in (1, 2):
+        try:
+            data = _responses_json(_PROMPT_EXTRACT_TABLE_ROWS, user, timeout=OPENAI_CORRECT_TIMEOUT * 3)
+            items = data.get("items")
+            return (items if isinstance(items, list) else []), None
+        except Exception as e:
+            error = str(e)[:500]
+            _log(f"[extract_rows] ERROR OpenAI con modelo '{OPENAI_MODEL}' (intento {intento}): {error}")
+    return None, error
 
 
 def _table_rows_for_ai(raw_analyze_result: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -731,10 +734,10 @@ def _table_rows_for_ai(raw_analyze_result: Dict[str, Any]) -> List[Dict[str, Any
     return rows
 
 
-def _extract_items_with_ai_from_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _extract_items_with_ai_from_rows(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
     La IA lee los renglones de las tablas con su encabezado y decide qué es partida y qué columna es
-    la descripción. Si un bloque falla, ese bloque cae al parser local.
+    la descripción. Si un bloque falla, ese bloque cae al parser local y su error se devuelve.
     """
     chunk_size = max(1, OPENAI_EXTRACT_CHUNK_ROWS)
 
@@ -762,6 +765,7 @@ def _extract_items_with_ai_from_rows(rows: List[Dict[str, Any]]) -> List[Dict[st
     write_progress(55, "Leyendo partidas con IA", f"{total} bloque(s) en paralelo")
 
     results: List[Optional[List[Dict[str, Any]]]] = [None] * total
+    errors: List[str] = []
     done = 0
     workers = max(1, min(OPENAI_CORRECT_MAX_WORKERS, total))
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -769,9 +773,11 @@ def _extract_items_with_ai_from_rows(rows: List[Dict[str, Any]]) -> List[Dict[st
         for fut in as_completed(futures):
             idx = futures[fut]
             try:
-                results[idx] = fut.result()
+                results[idx], error = fut.result()
             except Exception as e:
-                _log(f"[extract_rows] Bloque {idx + 1} falló: {e}")
+                error = str(e)[:500]
+            if error:
+                errors.append(f"Bloque {idx + 1}: {error}")
             done += 1
             write_progress(55 + int(35 * done / total), "Leyendo partidas con IA", f"bloque {done} de {total}")
 
@@ -794,7 +800,7 @@ def _extract_items_with_ai_from_rows(rows: List[Dict[str, Any]]) -> List[Dict[st
                 items.append(it)
 
     items.sort(key=lambda it: it.get("_r") if isinstance(it.get("_r"), int) else 10 ** 9)
-    return items
+    return items, errors
 
 
 def _openai_correct_items_chunk(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -884,12 +890,26 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
     rows = _table_rows_for_ai(raw_analyze_result)
     if OPENAI_API_KEY and OPENAI_CORRECT_ITEMS and rows and len(rows) <= OPENAI_MAX_ROWS_FOR_AI:
         write_progress(50, "Leyendo partidas de las tablas", f"{len(rows)} renglones encontrados")
-        sanitized = _sanitize_extracted_items(_extract_items_with_ai_from_rows(rows))
+        items, errors = _extract_items_with_ai_from_rows(rows)
+        sanitized = _sanitize_extracted_items(items)
         _log(f"[extract_items] Items finales (IA sobre renglones de tabla): {len(sanitized)}")
         write_progress(95, "Limpiando y validando partidas", f"{len(sanitized)} partidas listas")
-        return {"items_count": len(sanitized), "items": sanitized}
+        # "ia" le dice a Laravel si las partidas vienen de la IA o del parser de respaldo (y por qué).
+        return {
+            "items_count": len(sanitized),
+            "items": sanitized,
+            "ia": {"usada": not errors, "modelo": OPENAI_MODEL, "errores": errors},
+        }
 
-    _log("[extract_items] Sin IA para renglones: Azure/parser local extraen candidatos; OpenAI solo corrige.")
+    if not OPENAI_API_KEY:
+        motivo = "El servicio de Python no tiene OPENAI_API_KEY."
+    elif not OPENAI_CORRECT_ITEMS:
+        motivo = "OPENAI_CORRECT_ITEMS está apagado."
+    elif not rows:
+        motivo = "Azure no detectó tablas."
+    else:
+        motivo = f"{len(rows)} renglones superan OPENAI_MAX_ROWS_FOR_AI ({OPENAI_MAX_ROWS_FOR_AI})."
+    _log(f"[extract_items] Sin IA para renglones ({motivo}): Azure/parser local extraen candidatos; OpenAI solo corrige.")
 
     azure_candidates = _extract_candidates_from_azure_tables(raw_analyze_result)
     _log(f"[extract_items] Candidatos extraídos desde Azure/parser local: {len(azure_candidates)}")
@@ -944,7 +964,11 @@ def extract_items_from_azure_tables(raw_analyze_result: Dict[str, Any]) -> Dict[
     _log(f"[extract_items] Items finales después de corrección/sanitizado: {len(sanitized)}")
     write_progress(95, "Limpiando y validando partidas", f"{len(sanitized)} partidas listas")
 
-    return {"items_count": len(sanitized), "items": sanitized}
+    return {
+        "items_count": len(sanitized),
+        "items": sanitized,
+        "ia": {"usada": False, "modelo": OPENAI_MODEL, "errores": [motivo]},
+    }
 
 
 def debug_hash_bytes(file_bytes: bytes, label: str = "PDF") -> None:
